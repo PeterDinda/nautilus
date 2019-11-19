@@ -108,7 +108,82 @@ largest_page_size (void)
     return PS_2M;
 }
 
-/*
+static pte_t *
+walk_pt(pde_t *pt, addr_t addr)
+{
+    uint_t pt_idx = PADDR_TO_PT_IDX(addr);
+    addr_t page = 0;
+
+    DEBUG_PRINT("drilling pt, pt idx: 0x%x\n", pt_idx);
+
+    if (PTE_PRESENT(pt[pt_idx])) {
+        DEBUG_PRINT("pt entry is present\n");
+        return &pt[pt_idx];
+    } else {
+        DEBUG_PRINT("PT entry should exist!\n");
+        return 0;
+    }
+}
+
+static pte_t *
+walk_pd(pde_t *pd, addr_t addr)
+{
+    uint_t pd_idx = PADDR_TO_PD_IDX(addr);
+    pte_t * pt = 0;
+
+    DEBUG_PRINT("drilling pd, pd idx: 0x%x\n", pd_idx);
+
+    if (PDE_PRESENT(pd[pd_idx])) {
+
+        DEBUG_PRINT("pd entry is present, setting (addr=%p,flags=%x)\n", (void*)map_addr,flags);
+        pt = (pde_t*)(pd[pd_idx] & PTE_ADDR_MASK);
+        return walk_pt(pt, addr);
+    } else {
+       
+        DEBUG_PRINT("PD entry should exist!\n");
+        return 0;
+    }
+}
+
+static pte_t *
+walk_pdpt(pde_t *pdpt, addr_t addr)
+{
+    uint_t pdpt_idx = PADDR_TO_PDPT_IDX(addr);
+    pde_t * pd = 0;
+
+    DEBUG_PRINT("drilling pdpt, pdpt idx: 0x%x\n", pdpt_idx);
+
+    if (PDPTE_PRESENT(pdpt[pdpt_idx])) {
+
+        DEBUG_PRINT("pdpt entry is present\n");
+        pd = (pde_t*)(pdpt[pdpt_idx] & PTE_ADDR_MASK);
+        return walk_pd(pd, addr);
+
+    } else {
+        DEBUG_PRINT("PDPT entry should exist!\n");
+        return 0;
+    }
+}
+
+static pte_t *
+walk_page_table(addr_t addr)
+{
+    pml4e_t * _pml4 = (pml4e_t*)read_cr3();
+    uint_t pml4_idx = PADDR_TO_PML4_IDX(addr);
+    pdpte_t * pdpt  = 0;
+
+    if (PML4E_PRESENT(_pml4[pml4_idx])) {
+        DEBUG_PRINT("pml4 entry is present\n");
+        pdpt = (pdpte_t*)(_pml4[pml4_idx] & PTE_ADDR_MASK);
+        return walk_pdpt(pdpt, addr);
+    } else {
+
+        DEBUG_PRINT("PML4 entry should exist!\n");
+        return 0;
+    }
+}
+
+
 static int 
 drill_pt (pte_t * pt, addr_t addr, addr_t map_addr, uint64_t flags)
 {
@@ -121,7 +196,7 @@ drill_pt (pte_t * pt, addr_t addr, addr_t map_addr, uint64_t flags)
 
         DEBUG_PRINT("pt entry is present\n");
         page = (addr_t)(pt[pt_idx] & PTE_ADDR_MASK);
-
+        invlpg(map_addr);
     } else {
 
         DEBUG_PRINT("pt entry not there, creating a new one\n");
@@ -149,7 +224,7 @@ drill_pt (pte_t * pt, addr_t addr, addr_t map_addr, uint64_t flags)
 
     return 0;
 }
-*/
+
 
 
 static int 
@@ -157,45 +232,32 @@ drill_pd (pde_t * pd, addr_t addr, addr_t map_addr, uint64_t flags)
 {
     uint_t pd_idx = PADDR_TO_PD_IDX(addr);
     pte_t * pt = 0;
-    addr_t page = 0;
 
     DEBUG_PRINT("drilling pd, pd idx: 0x%x\n", pd_idx);
 
     if (PDE_PRESENT(pd[pd_idx])) {
 
         DEBUG_PRINT("pd entry is present, setting (addr=%p,flags=%x)\n", (void*)map_addr,flags);
-        pd[pd_idx] = map_addr | flags | PTE_PAGE_SIZE_BIT | PTE_PRESENT_BIT;
-        invlpg(map_addr);
+        pt = (pde_t*)(pd[pd_idx] & PTE_ADDR_MASK);
 
     } else {
 
-        if (map_addr) {
+        DEBUG_PRINT("pd entry not there, creating a new page directory\n");
+        pt = (pde_t*)mm_boot_alloc_aligned(PAGE_SIZE_4KB, PAGE_SIZE_4KB);
+        DEBUG_PRINT("page dir allocated at %p\n", pd);
 
-            DEBUG_PRINT("creating manual mapping to paddr: %p\n", map_addr);
-            page = map_addr;
-            // NOTE: 2MB page assumption
-            pd[pd_idx] = page | flags | PTE_PAGE_SIZE_BIT;
-
-        } else {
-
-            panic("trying to allocate 2MB page with no address provided!\n");
-#if 0
-            DEBUG_PRINT("pd entry not there, creating a new one\n");
-            pt = (pte_t*)alloc_page();
-
-            if (!pt) {
-                ERROR_PRINT("out of memory in %s\n", __FUNCTION__);
-                return -1;
-            }
-
-            memset((void*)pt, 0, NUM_PT_ENTRIES*sizeof(pte_t));
-
-            pd[pd_idx] = (ulong_t)pt | PTE_PRESENT_BIT | PTE_WRITABLE_BIT;
-#endif
+        if (!pt) {
+            ERROR_PRINT("out of memory in %s\n", __FUNCTION__);
+            return -EINVAL;
         }
+
+        memset((void*)pt, 0, NUM_PD_ENTRIES*sizeof(pde_t));
+
+        pd[pd_idx] = (ulong_t)pt | PTE_PRESENT_BIT | PTE_WRITABLE_BIT;
     }
 
-    return 0;
+    DEBUG_PRINT("the entry (addr: 0x%x): 0x%x\n", &pd[pd_idx], pd[pd_idx]);
+    return drill_pt(pt, addr, map_addr, flags);
 }
 
 

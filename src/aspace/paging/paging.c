@@ -192,6 +192,8 @@ static int remove_region(void *state, nk_aspace_region_t *region)
     end_addr = ROUND_DOWN_TO_PAGE(end_addr + PAGE_SIZE_4KB - 1);
     for(; base_addr < end_addr; ){
       // I need to add a function to get the pte, walk_page_table()
+      // in walk_page_table, it doesn't allocate pte, drill will allocate
+      // walk function only get the existing pte
       pte_t* pte = walk_page_table(base_addr);
       *pte &= ~PTE_PRESENT_BIT;
       base_addr += PAGE_SIZE_4KB;
@@ -275,25 +277,25 @@ static int exception(void *state, excp_entry_t *exp, excp_vec_t vec)
   uint64_t va = read_cr2();
   pte_t* pte = walk_page_table(base_addr); 
   if(pte == 0){
-    DEBUG("Invalid virtual address 0x%x, on thread %d\n", va, thread->tid);
+    panic("Invalid virtual address 0x%x, on thread %d\n", va, thread->tid);
     return -1;
   }
   if(!(*pte & PTE_KERNEL_ONLY_BIT)){
-    DEBUG("Illegal kernal only virtual address 0x%x, on thread %d\n", va, thread->tid);
+    panic("Illegal kernal only virtual address 0x%x, on thread %d\n", va, thread->tid);
     return -1;
   }
   if(!(*pte & PTE_PRESENT_BIT)){
-    DEBUG("Virtual address 0x%x not present, on thread %d\n", va, thread->tid);
+    panic("Virtual address 0x%x not present, on thread %d\n", va, thread->tid);
     return -1;
   }
   if(!(*pte & PTE_KERNEL_WRITABLE_BIT)){
-    DEBUG("Virtual address 0x%x not writable, on thread %d\n", va, thread->tid);
+    panic("Virtual address 0x%x not writable, on thread %d\n", va, thread->tid);
     return -1;
   }
   // what access permissions should it meet, PRESENT_BIT, WRITABLE_BIT
   
   if(drill_page_tables(va, PTE_ADDR(pte),0) != 0){
-    DEBUG("Drill page table error on thread %d\n", thread->tid\);
+    panic("Drill page table error on thread %d\n", thread->tid\);
     return -1;
   }
   write_cr3(p->cr3); 

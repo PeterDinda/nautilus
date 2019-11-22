@@ -1,1 +1,1 @@
-obj-y = paging.o
+obj-y = paging.o paging_helpers.o

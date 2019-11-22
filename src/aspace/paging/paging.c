@@ -7,6 +7,8 @@
 
 #include <nautilus/aspace.h>
 
+#include "paging_helpers.h"
+
 #ifndef NAUT_CONFIG_DEBUG_ASPACE_PAGING
 #undef DEBUG_PRINT
 #define DEBUG_PRINT(fmt, args...) 
@@ -19,16 +21,16 @@
 
 struct mm_node {
     nk_aspace_region_t region;
-    mm_node *next;
+    struct list_head node;
 };
 
 
 typedef struct nk_aspace_paging {
   nk_aspace_t *aspace;
-
+    
   spinlock_t   lock;
-  struct mm_node *mmap;  // vm region sorted list
-  //struct rb_root mm_rb;  // contains regions
+  struct list_head region_list;
+    
   nk_aspace_characteristics_t chars;
 
   uint64_t     cr3; 
@@ -36,6 +38,7 @@ typedef struct nk_aspace_paging {
   uint64_t     cr4;
 } nk_aspace_paging_t;
 
+#if 0
 // This table defines the kernel's mappings
 static struct kmap {
   uint64_t virt;
@@ -49,6 +52,7 @@ static struct kmap {
  { (void*)va_kern_start, kern_start, kern_end, 0},     // kern text+rodata+normaldata+memory 
 };
 
+#endif
 
 static void setup_paging(void *state){
   nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;

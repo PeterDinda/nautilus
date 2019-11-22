@@ -59,6 +59,7 @@ typedef struct nk_aspace_protections {
 #define NK_ASPACE_PIN    8
 #define NK_ASPACE_KERN   16   // meaning "kernel only", which is not yet supported
 #define NK_ASPACE_SWAP   32   // meaning "is swaped", which is not yet supported
+#define NK_ASPACE_EAGER  64   // meaning the mapping must be immediately constructed
 } nk_aspace_protection_t;
 
 
@@ -70,6 +71,7 @@ typedef struct nk_aspace_region {
     void       *va_start;
     void       *pa_start;
     uint64_t    len_bytes;
+    nk_aspace_protection_t  protect;
 } nk_aspace_region_t;
 
 

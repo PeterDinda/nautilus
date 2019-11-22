@@ -36,6 +36,36 @@ typedef struct nk_aspace_paging {
   uint64_t     cr4;
 } nk_aspace_paging_t;
 
+// This table defines the kernel's mappings
+static struct kmap {
+  uint64_t virt;
+  uint64_t phys_start;
+  uint64_t phys_end;
+  int  flags;
+} kmap[] = {
+ // addr_t kern_start     = (addr_t)&_loadStart;
+ // addr_t kern_end       = multiboot_get_modules_end(mbd);
+ // not sure about the boundary of each region
+ { (void*)va_kern_start, kern_start, kern_end, 0},     // kern text+rodata+normaldata+memory 
+};
+
+
+static void setup_paging(void *state){
+  nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
+  // at first, paging aspace still use the direct mapping, like the base aspace
+  struct kmap *k;
+  uint64_t va_addr, pa_addr;
+  int nele = (sizeof(kmaps)) / sizeof(struct kmap) ; 
+  for(k = kmap; k < &kmap[nele]; k++){
+    for(va_addr = k->virt, pa_addr = k->phys_start; pa_addr < k->phys_end; va_addr += PAGE_SIZE_4KB, pa_addr += PAGE_SIZE_4KB){
+      // map kernel text and data to aspace higher address
+      nk_map_page(va_addr, pa_addr, k->flags, PAGE_SIZE_4KB)
+    }
+  }
+  // how to change to use high address?
+  // since we have made the mapping, we should be able to find the physical address of next instruction using page table
+  write_cr3(p->cr3);  
+}
 
 
 static  int destroy(void *state)
@@ -91,7 +121,7 @@ static int add_region(void *state, nk_aspace_region_t *region)
     new_node->region = region;
     new_node->next = NULL;
 
-    if (p->mmap == NULL || p->mmap->region.va >= region->va){  
+    if (p->mmap == NULL || p->mmap->region.va_start >= region->va_start){  
         new_node->next = p->mmap;  
         p->mmap = new_node;  
     }  
@@ -99,7 +129,7 @@ static int add_region(void *state, nk_aspace_region_t *region)
         /* Locate the node before the point of insertion */
         struct mm_node* current = p->mmap;  
         while (current->next != NULL &&  
-            current->next->region.va < region->va)
+            current->next->region.va_start < region->va_start)
         {  
             current = current->next;  
         }  
@@ -110,11 +140,11 @@ static int add_region(void *state, nk_aspace_region_t *region)
     // now you need to edit page tables to match
     // easiest way: delete all page tables and start from scratch
     // assume the va and pa in region may not be page aligned
-    ulong_t base_addr = (ulong_t)region->va;    
+    ulong_t base_addr = (ulong_t)region->va_start;    
     ulong_t end_addr = base_addr + region->len_bytes;
     base_addr = ROUND_DOWN_TO_PAGE(base_addr);
     end_addr = ROUND_DOWN_TO_PAGE(end_addr + PAGE_SIZE_4KB - 1);
-    ulong_t pa_base_addr = ROUND_DOWN_TO_PAGE(region->pa);
+    ulong_t pa_base_addr = ROUND_DOWN_TO_PAGE(region->pa_start);
     for(; base_addr < end_addr; ){
       // here how should i pick up a physical address? use the pa provied in region?
       // looks like I map them to continuous physical memory, but it shouldn't
@@ -192,8 +222,8 @@ static int move_region(void *state, nk_aspace_region_t *cur_region, nk_aspace_re
     if(cur_region->len_bytes != new_region->len_bytes)
       ERROR("Cannot move two regions that have different length\n");
     nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
+    memcpy(new_region->va_start, cur_region->va_start, new_region->len_bytes);
     // now need to edit page tables to match
-    // should I do copy work?? move the content in pa of cur_region to pa of new_region
     remove_region(state, cur_region);
     add_region(state, new_region);
     return 0;
@@ -344,6 +374,8 @@ static int   get_characteristics(nk_aspace_characteristics_t *c)
   return 0;
 }
 
+
+
 static struct nk_aspace * create(char *name, nk_aspace_characteristics_t *c)
 {
   struct naut_info *info = nk_get_nautilus_info();
@@ -374,8 +406,6 @@ static struct nk_aspace * create(char *name, nk_aspace_characteristics_t *c)
   }
 
   memset(pml4,0,PAGE_SIZE_4KB);
-  // not sure about the construct pt
-  //__construct_tables_4k(pml4, PAGE_SIZE_4KB*PAGE_SIZE_4KB); //  malloc init 16MB for this address space
 
   // need to actually drill page tables for basic parts of NK
   // ???
@@ -385,7 +415,6 @@ static struct nk_aspace * create(char *name, nk_aspace_characteristics_t *c)
 
   p->aspace = nk_aspace_register(name,
 				 NK_ASPACE_HOOK_PF | NK_ASPACE_HOOK_GPF,
-    struct mm_node* cur_node = p->mmap;
 				 &paging_interface,
 				 p);
 
@@ -393,6 +422,8 @@ static struct nk_aspace * create(char *name, nk_aspace_characteristics_t *c)
     ERROR("Unable to register paging address space %s\n",name);
     return 0;
   }
+  // start using paging table
+  setup_paging(p);
 
   DEBUG("Paging address space %s configured and initialized\n", name);
     

@@ -19,7 +19,7 @@ int paging_helper_create(ph_cr3e_t *cr3)
     ph_pml4e_t *pml4 = ALLOC_PHYSICAL_PAGE();  // must be aligned to 4 KB boundary
 
     if (!pml4) {
-	ERROR("Failed to allocate PML4T\n");
+	ERROR("Failed to allocate PML4\n");
 	return -1;
     }
 
@@ -47,7 +47,7 @@ int paging_helper_free(ph_cr3e_t cr3, int free_data)
 	    for (j=0;j<NUM_PDPE_ENTRIES;j++) {
 		if (pdpe[j].present) {
 		    ph_pde_t *pde = (ph_pde_t *)PAGE_NUM_TO_ADDR_4KB(pdpe[j].pd_base);
-		    for (k=0;k<NUM_PDE_ENTRIES;j++) {
+		    for (k=0;k<NUM_PDE_ENTRIES;k++) {
 			if (pde[k].present) {
 			    ph_pte_t *pte = (ph_pte_t *)PAGE_NUM_TO_ADDR_4KB(pde[k].pt_base);
 			    if (free_data) { 
@@ -107,7 +107,7 @@ int paging_helper_walk(ph_cr3e_t cr3, addr_t vaddr, ph_pf_access_t access_type, 
     ph_pml4e_t *pml4e = &pml4[ADDR_TO_PML4_INDEX(vaddr)];
     
     if (pml4e->present && perm_ok(pml4e,access_type)) {
-	ph_pdpe_t *pdp = (ph_pdpe_t *)PAGE_NUM_TO_ADDR_4KB(pml4->pdp_base);
+	ph_pdpe_t *pdp = (ph_pdpe_t *)PAGE_NUM_TO_ADDR_4KB(pml4e->pdp_base);
 	ph_pdpe_t *pdpe = &pdp[ADDR_TO_PDP_INDEX(vaddr)];
 	if (pdpe->present && perm_ok(pdpe,access_type)) {
 	    ph_pde_t *pd = (ph_pde_t *)PAGE_NUM_TO_ADDR_4KB(pdpe->pd_base);
@@ -141,6 +141,8 @@ int paging_helper_walk(ph_cr3e_t cr3, addr_t vaddr, ph_pf_access_t access_type, 
     }
 }
 
+// bug:  permset at high level needs to be a union the permissions at the lower level...
+// also need to revoke permissions if we remove mappings.
 
 int paging_helper_drill(ph_cr3e_t cr3, addr_t vaddr, addr_t paddr, ph_pf_access_t access_type)
 {
@@ -149,7 +151,7 @@ int paging_helper_drill(ph_cr3e_t cr3, addr_t vaddr, addr_t paddr, ph_pf_access_
     
     if (pml4e->present) {
 	perm_set(pml4e,access_type);
-	ph_pdpe_t *pdp = (ph_pdpe_t *)PAGE_NUM_TO_ADDR_4KB(pml4->pdp_base);
+	ph_pdpe_t *pdp = (ph_pdpe_t *)PAGE_NUM_TO_ADDR_4KB(pml4e->pdp_base);
 	ph_pdpe_t *pdpe = &pdp[ADDR_TO_PDP_INDEX(vaddr)];
 	if (pdpe->present) {
 	    perm_set(pdpe,access_type);
@@ -183,7 +185,7 @@ int paging_helper_drill(ph_cr3e_t cr3, addr_t vaddr, addr_t paddr, ph_pf_access_
 	    // allocate a PDT
 	    ph_pde_t *pd = (ph_pde_t *)ALLOC_PHYSICAL_PAGE();
 	    if (!pd) {
-		ERROR("Cannot allocate PD\n");
+		ERROR("Cannot allocate PDT\n");
 		return -1;
 	    }
 	    memset(pd,0,PAGE_SIZE_4KB);

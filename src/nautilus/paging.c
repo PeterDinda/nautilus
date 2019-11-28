@@ -184,7 +184,7 @@ walk_page_table(addr_t addr)
 }
 
 
-static int 
+/*static int 
 drill_pt (pte_t * pt, addr_t addr, addr_t map_addr, uint64_t flags)
 {
     uint_t pt_idx = PADDR_TO_PT_IDX(addr);
@@ -223,7 +223,7 @@ drill_pt (pte_t * pt, addr_t addr, addr_t map_addr, uint64_t flags)
     }
 
     return 0;
-}
+}*/
 
 
 
@@ -232,32 +232,46 @@ drill_pd (pde_t * pd, addr_t addr, addr_t map_addr, uint64_t flags)
 {
     uint_t pd_idx = PADDR_TO_PD_IDX(addr);
     pte_t * pt = 0;
+    addr_t page = 0;
 
     DEBUG_PRINT("drilling pd, pd idx: 0x%x\n", pd_idx);
 
     if (PDE_PRESENT(pd[pd_idx])) {
 
         DEBUG_PRINT("pd entry is present, setting (addr=%p,flags=%x)\n", (void*)map_addr,flags);
-        pt = (pde_t*)(pd[pd_idx] & PTE_ADDR_MASK);
+        pd[pd_idx] = map_addr | flags | PTE_PAGE_SIZE_BIT | PTE_PRESENT_BIT;
+        invlpg(map_addr);
 
     } else {
 
-        DEBUG_PRINT("pd entry not there, creating a new page directory\n");
-        pt = (pde_t*)mm_boot_alloc_aligned(PAGE_SIZE_4KB, PAGE_SIZE_4KB);
-        DEBUG_PRINT("page dir allocated at %p\n", pd);
+        if (map_addr) {
 
-        if (!pt) {
-            ERROR_PRINT("out of memory in %s\n", __FUNCTION__);
-            return -EINVAL;
+            DEBUG_PRINT("creating manual mapping to paddr: %p\n", map_addr);
+            page = map_addr;
+            // NOTE: 2MB page assumption
+            pd[pd_idx] = page | flags | PTE_PAGE_SIZE_BIT;
+
+        } else {
+
+            panic("trying to allocate 2MB page with no address provided!\n");
+#if 0
+            DEBUG_PRINT("pd entry not there, creating a new one\n");
+            pt = (pte_t*)alloc_page();
+
+            if (!pt) {
+                ERROR_PRINT("out of memory in %s\n", __FUNCTION__);
+                return -1;
+            }
+
+            memset((void*)pt, 0, NUM_PT_ENTRIES*sizeof(pte_t));
+
+            pd[pd_idx] = (ulong_t)pt | PTE_PRESENT_BIT | PTE_WRITABLE_BIT;
+#endif
         }
-
-        memset((void*)pt, 0, NUM_PD_ENTRIES*sizeof(pde_t));
-
-        pd[pd_idx] = (ulong_t)pt | PTE_PRESENT_BIT | PTE_WRITABLE_BIT;
     }
 
-    DEBUG_PRINT("the entry (addr: 0x%x): 0x%x\n", &pd[pd_idx], pd[pd_idx]);
-    return drill_pt(pt, addr, map_addr, flags);
+    return 0;
+
 }
 
 

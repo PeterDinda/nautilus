@@ -19,10 +19,10 @@
 #define INFO(fmt, args...)   INFO_PRINT("aspace-paging: " fmt, ##args)
 
 
-struct mm_node {
+typedef struct mmnode {
     nk_aspace_region_t region;
     struct list_head node;
-};
+} mm_node;
 
 
 typedef struct nk_aspace_paging {
@@ -33,7 +33,7 @@ typedef struct nk_aspace_paging {
     
   nk_aspace_characteristics_t chars;
 
-  uint64_t     cr3; 
+  ph_cr3e_t     cr3; 
 #define CR4_MASK 0xb0ULL // bits 4,5,7
   uint64_t     cr4;
 } nk_aspace_paging_t;
@@ -52,47 +52,52 @@ static struct kmap {
  { (void*)va_kern_start, kern_start, kern_end, 0},     // kern text+rodata+normaldata+memory 
 };
 
-#endif
 
 static void setup_paging(void *state){
+  // since we are still using direct mapping, all these codes should be able to execute
   nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
-  // at first, paging aspace still use the direct mapping, like the base aspace
+  // first, map only the kernel code, data
   struct kmap *k;
   uint64_t va_addr, pa_addr;
   int nele = (sizeof(kmaps)) / sizeof(struct kmap) ; 
   for(k = kmap; k < &kmap[nele]; k++){
     for(va_addr = k->virt, pa_addr = k->phys_start; pa_addr < k->phys_end; va_addr += PAGE_SIZE_4KB, pa_addr += PAGE_SIZE_4KB){
-      // map kernel text and data to aspace higher address
       nk_map_page(va_addr, pa_addr, k->flags, PAGE_SIZE_4KB)
+      // I can't use paging_helper_drill(), since it will allocate a new physical page. I just need to map
     }
   }
-  // how to change to use high address?
-  // since we have made the mapping, we should be able to find the physical address of next instruction using page table
-  write_cr3(p->cr3);  
+  // second, write the physical address of pml4e into cr3 
+  write_cr3((p->cr3).pml4_base); 
+  // third, set up the most significant bit in cr0
+  ulong_t cr0 = read_cr0(); 
+  cr0 = cr0 | (1 << 63);
+  write_cr0(cr0);
+  // now we start using paging, if page fault happens, process can use the mapped kernel code to handle it, thus avoiding triple fault
 }
 
+#endif
 
 static  int destroy(void *state)
 {
     nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
-// free region information
-    struct mm_node *r = p->mmap;
-    struct mm_node *r_next = r;
-    while(r != NULL){
-      r_next = r->next;
-      free(r);
-      r = r_next;
+    // free regions in list
+    struct list_head *pos = &(p->region_list);
+    list_for_each(pos, &p->region_list){
+      mm_node *node = (mm_node *)(pos - sizeof(nk_aspace_region_t));
+      free(node);
     }
 
-// why don't we use a global lock to remove aspace from aspace list
+/* don't worry about it now
     STATE_LOCK_CONF;
     
     STATE_LOCK();
     list_del(&p->aspace->aspace_list_node); 
     STATE_UNLOCK();
 //  ....
-
-    free(p->aspace);
+*/
+    // free paging table
+    paging_helper_free(p->cr3, 1);
+    // free aspace struct
     free(p); 
     return 0;
 }
@@ -100,11 +105,10 @@ static  int destroy(void *state)
 
 static int add_thread(void *state)
 {
-    nk_aspace_paging_t *as = (nk_aspace_paging_t *)state;
+    nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
     struct nk_thread *thread = get_cur_thread();
-    thread->aspace = as->aspace;
-    DEBUG("Add thread %p to base address\n");
-    
+    thread->aspace = p->aspace;
+    DEBUG("Add thread %p to base address\n");    
     return 0;
 }
     
@@ -114,95 +118,75 @@ static int remove_thread(void *state)
     struct nk_thread *thread = get_cur_thread();
     thread->aspace = 0;
     return 0;
-    
 }
 
 
 static int add_region(void *state, nk_aspace_region_t *region)
 {
+    // add the new node into region_list
     nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
-    struct mm_node* new_node = (struct mm_node*)malloc(sizeof(struct mm_node));   
-    new_node->region = region;
-    new_node->next = NULL;
+    mm_node* new_node = (mm_node*)malloc(sizeof(mm_node));   
+    new_node->region = *region;
+    list_add(&(new_node->node), &(p->region_list));
 
-    if (p->mmap == NULL || p->mmap->region.va_start >= region->va_start){  
-        new_node->next = p->mmap;  
-        p->mmap = new_node;  
-    }  
-    else{  
-        /* Locate the node before the point of insertion */
-        struct mm_node* current = p->mmap;  
-        while (current->next != NULL &&  
-            current->next->region.va_start < region->va_start)
-        {  
-            current = current->next;  
-        }  
-        new_node->next = current->next;  
-        current->next = new_node;  
-    }  
-
-    // now you need to edit page tables to match
+    // edit page tables to match
     // easiest way: delete all page tables and start from scratch
     // assume the va and pa in region may not be page aligned
     ulong_t base_addr = (ulong_t)region->va_start;    
     ulong_t end_addr = base_addr + region->len_bytes;
     base_addr = ROUND_DOWN_TO_PAGE(base_addr);
     end_addr = ROUND_DOWN_TO_PAGE(end_addr + PAGE_SIZE_4KB - 1);
-    ulong_t pa_base_addr = ROUND_DOWN_TO_PAGE(region->pa_start);
+    ulong_t pa_base_addr = ROUND_DOWN_TO_PAGE((ulong_t)(region->pa_start));
+    // not sure about the ifetch bit
+    ph_pf_access_t access_type = {0, 1, 1, 0, 0, 0};
     for(; base_addr < end_addr; ){
       // here how should i pick up a physical address? use the pa provied in region?
       // looks like I map them to continuous physical memory, but it shouldn't
-      if(nk_map_page(base_addr, pa_base_addr, 0, PAGE_SIZE_4KB) != 0){
-        ERROR_PRINT("Could not map page at vaddr %p paddr %p\n", (void*)vaddr, (void*)paddr);
+      if(paging_helper_drill(p->cr3, base_addr, pa_base_addr, access_type) != 0){
+        ERROR_PRINT("Could not map page at vaddr %p paddr %p\n", (void*)base_addr, (void*)pa_base_addr);
       }
       base_addr += PAGE_SIZE_4KB;
       pa_base_addr += PAGE_SIZE_4KB;
     } 
-    write_cr3(p->cr3); 
+    write_cr3((p->cr3).pml4_base); 
     return 0;
 }
 
 static int remove_region(void *state, nk_aspace_region_t *region)
 {
-    nk_aspace_paging_t *as = (nk_aspace_paging_t *)state;
-    struct mm_node* current = p->mmap;
-    if(current == NULL) panic("Remove region from an empty linked list\n");
-    uint64_t end_addr = (uint64_t)region->va_start + region->len_bytes;
-    // assume we can only remove a region that is exist in the current linked list
-    // the region that will be removed will have an identical copy in the list    
-    if (p->mmap != NULL && p->mmap->region.va_start == region->va_start && 
-           p->mmap->region.pa_start == region->pa_start && 
-           p->mmap->region.len_bytes == region->len_bytes){  
-        p->mmap = p->mmap->next;  
-    }  
-    else{  
-        struct mm_node* current = p->mmap;  
-        while (current->next != NULL) 
-        {  
-            if(current->next->region.va_start == region->va_start &&
-                 current->next->region.pa_start == region->pa_start &&
-                 current->next->region.len_bytes == region->len_bytes){
-               current->next = current->next->next;
-               break;
-            }
-            else current = current->next;  
-        }  
-    } 
+    nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
+    // assume the region we need to remove exists in the current linked list
+    struct list_head *pos = &(p->region_list);
+    nk_aspace_region_t *current;
+    list_for_each(pos, &p->region_list){
+      current = (nk_aspace_region_t *)(pos - sizeof(nk_aspace_region_t));
+      if(current->va_start == region->va_start && current->pa_start == region->pa_start &&
+                 current->len_bytes == region->len_bytes){
+        break;
+      }
+    }
+    mm_node *current_mmnode = (mm_node *)current;
+    list_del(&(current_mmnode->node));
+    free(current_mmnode);
 
-    // now need to edit page tables to match
-    ulong_t base_addr = (ulong_t)region->va;    
+    // edit page tables to match
+    ulong_t base_addr = (ulong_t)region->va_start;    
     ulong_t end_addr = base_addr + region->len_bytes;
     base_addr = ROUND_DOWN_TO_PAGE(base_addr);
     end_addr = ROUND_DOWN_TO_PAGE(end_addr + PAGE_SIZE_4KB - 1);
+    pte_t *pte;
+    ph_pf_access_t access_type = {0, 1, 1, 0, 0, 0} ;
     for(; base_addr < end_addr; ){
       // I need to add a function to get the pte, walk_page_table()
       // in walk_page_table, it doesn't allocate pte, drill will allocate
       // walk function only get the existing pte
-      pte_t* pte = walk_page_table(base_addr);
+      if(paging_helper_walk(p->cr3, base_addr, access_type, &pte) != 0){
+        panic("Cannot find the page at addr 0x%x\n", base_addr);
+      }
       *pte &= ~PTE_PRESENT_BIT;
       base_addr += PAGE_SIZE_4KB;
     } 
-    write_cr3(p->cr3); 
+    write_cr3((p->cr3).pml4_base); 
     return 0;
 }
    
@@ -210,16 +194,20 @@ static int protect_region(void *state, nk_aspace_region_t *region, nk_aspace_pro
 {
     nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
     // now need to edit page tables to match
-    ulong_t base_addr = (ulong_t)region->va;    
+    ulong_t base_addr = (ulong_t)region->va_start;    
     ulong_t end_addr = base_addr + region->len_bytes;
     base_addr = ROUND_DOWN_TO_PAGE(base_addr);
     end_addr = ROUND_DOWN_TO_PAGE(end_addr + PAGE_SIZE_4KB - 1);
+    pte_t* pte;
+    ph_pf_access_t access_type = {0, 1, 1, 0, 0, 0};
     for(; base_addr < end_addr; ){
-      pte_t* pte = walk_page_table(base_addr);
-      *pte &= ~(*prot); // nk_aspace_protection_t in aspace.h does not match with the pte protection bit pattern in paging.h
+      if(paging_helper_walk(p->cr3, base_addr, access_type, &pte) != 0){
+        panic("Cannot find the page at addr 0x%x\n", base_addr);
+      }
+      *pte &= ~(prot->flags); // nk_aspace_protection_t in aspace.h does not match with the pte protection bit pattern in paging.h
       base_addr += PAGE_SIZE_4KB;
     }
-    write_cr3(p->cr3); 
+    write_cr3((p->cr3).pml4_base); 
     return 0;
 }
 
@@ -239,7 +227,7 @@ static int move_region(void *state, nk_aspace_region_t *cur_region, nk_aspace_re
 
 static int switch_from(void *state)
 {
-  struct nk_aspace_paging *as = (struct nk_aspace_paging *)state;
+  struct nk_aspace_paging *p = (struct nk_aspace_paging *)state;
   struct nk_thread *thread = get_cur_thread();
   
   DEBUG("Switching out base address space from thread %d\n",thread->tid);
@@ -252,10 +240,10 @@ static int switch_to(void *state)
   nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
   struct nk_thread *thread = get_cur_thread();
   DEBUG("Switching in address space %s from thread %d\n",p->aspace->name,thread->tid);
-  write_cr3(a->cr3);
-  cr4 = read_cr4();
+  write_cr3((p->cr3).pml4_base); 
+  uint64_t cr4 = read_cr4();
   cr4 &= ~CR4_MASK;
-  cr4 |= a->cr4;
+  cr4 |= p->cr4;
   write_cr4(cr4);
   return 0;
 }
@@ -266,6 +254,7 @@ static int exception(void *state, excp_entry_t *exp, excp_vec_t vec)
   struct nk_thread *thread = get_cur_thread();
 
   DEBUG("Exception 0x%x on thread %d\n",vec,thread->tid);
+  uint64_t va = read_cr2();
 
   // FIX ME - I NOW NEED TO DRILL A PTE IF THIS IS A VALID PAGE FAULT
   // if PF
@@ -278,12 +267,13 @@ static int exception(void *state, excp_entry_t *exp, excp_vec_t vec)
   if(vec == NK_ASPACE_HOOK_GPF){
     panic("General protection fault on address 0x%x, on thread %d\n", va, thread->tid);
   }
-  uint64_t va = read_cr2();
-  pte_t* pte = walk_page_table(base_addr); 
-  if(pte == 0){
-    panic("Invalid virtual address 0x%x, on thread %d\n", va, thread->tid);
-    return -1;
+  uint64_t *pte;
+  ph_pf_access_t access_type = {0, 1, 1, 0, 0, 0};
+  if(paging_helper_walk(p->cr3, va, access_type, &pte) != 0){
+     panic("Cannot find the page table entry of virtual addr 0x%x\n", va);
   }
+  uint64_t pa = PAGE_NUM_TO_ADDR_4KB((*pte) & ~0xFFF); // (((addr_t)x) << 12)
+  // what access permissions should it meet, PRESENT_BIT, WRITABLE_BIT
   if(!(*pte & PTE_KERNEL_ONLY_BIT)){
     panic("Illegal kernal only virtual address 0x%x, on thread %d\n", va, thread->tid);
     return -1;
@@ -292,17 +282,18 @@ static int exception(void *state, excp_entry_t *exp, excp_vec_t vec)
     panic("Virtual address 0x%x not present, on thread %d\n", va, thread->tid);
     return -1;
   }
-  if(!(*pte & PTE_KERNEL_WRITABLE_BIT)){
+  if(!(*pte & PTE_WRITABLE_BIT)){
     panic("Virtual address 0x%x not writable, on thread %d\n", va, thread->tid);
     return -1;
   }
-  // what access permissions should it meet, PRESENT_BIT, WRITABLE_BIT
-  
-  if(drill_page_tables(va, PTE_ADDR(pte),0) != 0){
-    panic("Drill page table error on thread %d\n", thread->tid\);
-    return -1;
-  }
-  write_cr3(p->cr3); 
+
+  // not sure about the ifetch bit
+  // access_type = { 0, 1, 1, 0, 0, 0};
+  if(paging_helper_drill(p->cr3, va, pa, access_type) != 0){
+    panic("Could not map page at vaddr %p paddr %p\n", (void*)va, (void*)pa);
+  }  
+  write_cr3((p->cr3).pml4_base); 
+  return 0;
 }
     
 static int print(void *state, int detailed)
@@ -317,31 +308,35 @@ static int print(void *state, int detailed)
   // basic info
   nk_vc_printf("%s Paging Address Space [granularity 0x%lx alignment 0x%lx]\n"
    	       "   CR3:    %016lx  CR4m: %016lx\n",
-   	       p->aspace->name, p->chars.granularity, p->chars.alignment, p->cr3, p->cr4);
+   	       p->aspace->name, p->chars.granularity, p->chars.alignment, p->cr3.val, p->cr4);
   // regions info
-  struct mm_node* current = p->mmap;
-  while(current != NULL){
+  struct list_head *pos = &(p->region_list);
+  list_for_each(pos, &p->region_list){
+    nk_aspace_region_t *region = (nk_aspace_region_t *)(pos - sizeof(nk_aspace_region_t));
     nk_vc_printf("   Region: %016lx - %016lx => %016lx\n",
-   	       (uint64_t) as->theregion.va_start, 
-   		 (uint64_t) as->theregion.va_start + as->theregion.len_bytes);
-    current = current->next;
+               (uint64_t) region->va_start,
+               (uint64_t) region->va_start + region->len_bytes, 
+               (uint64_t) region->pa_start);
   }
   // page info
+  ph_cr3e_t cr3 = p->cr3;
+  ph_pml4e_t *pml4e = (ph_pml4e_t *)PAGE_NUM_TO_ADDR_4KB(cr3.pml4_base);
+
   int i, j, k, m;
   for (i = 0; i < NUM_PML4_ENTRIES; i++) {
-    if(pml[i] != 0){
-      pdpte_t * pdpt = (pdpte_t*)PTE_ADDR(pml[i]);
+    if(pml4e[i].present){      
+      ph_pdpe_t *pdpe = (ph_pdpe_t *)PAGE_NUM_TO_ADDR_4KB(pml4e[i].pdp_base);
       for (j = 0; j < NUM_PDPT_ENTRIES; j++) {
-        if(pdpt[j] != 0){
-          pde_t * pd = (pde_t*)PTE_ADDR(pdpt[j]);          
+        if(pdpe[j].present){
+          ph_pde_t * pd = (ph_pde_t *)PAGE_NUM_TO_ADDR_4KB(pdpe[j].pd_base);          
           for (k = 0; k < NUM_PD_ENTRIES; k++) {
-            if(pd[k] != 0){
-              pte_t * pt = (pte_t*)PTE_ADDR(pd[k]);
+            if(pd[k].present){
+              ph_pte_t * pt = (ph_pte_t *)PAGE_NUM_TO_ADDR_4KB(pd[k].pt_base);
               for (m = 0; m < NUM_PT_ENTRIES; m++) {
-                if(pt[m] != 0){
+                if(pt[m].present){
                   uint64_t va = (i << PML4_SHIFT) | (j << PDPT_SHIFT) | (k << PD_SHIFT) | (m << PT_SHIFT) ;
-                  nk_vc_printf("   Page: va 0x%x -> pa 0x%x, protection bits 0x%x\n",
-   	              va, PTE_ADDR(pte), (pte & ((1<<12)-1)));
+                  uint64_t pa = PAGE_NUM_TO_ADDR_4KB(pt[m].page_base);
+                  nk_vc_printf("   Page: va 0x%x -> pa 0x%x\n", va, pa);
                 }
               }
             }
@@ -370,9 +365,6 @@ static nk_aspace_interface_t paging_interface = {
 
 
 
-
-
-
 static int   get_characteristics(nk_aspace_characteristics_t *c)
 {
   c->granularity = c->alignment = PAGE_SIZE_4KB;
@@ -385,8 +377,7 @@ static int   get_characteristics(nk_aspace_characteristics_t *c)
 static struct nk_aspace * create(char *name, nk_aspace_characteristics_t *c)
 {
   struct naut_info *info = nk_get_nautilus_info();
-  nk_paging_aspace_t *p;
-  
+  nk_aspace_paging_t *p;  
   p = malloc(sizeof(*p));
   
   if (!p) {
@@ -399,11 +390,11 @@ static struct nk_aspace * create(char *name, nk_aspace_characteristics_t *c)
   spinlock_init(&p->lock);
   
   //p->mm_rb = RB_ROOT;
-  p->mmap = NULL; 
+  INIT_LIST_HEAD(&(p->region_list));
 
-  p->chars.granularity = paging_state.chars.alignment = PAGE_SIZE_4KB;
+  p->chars.granularity = p->chars.alignment = PAGE_SIZE_4KB;
 
-  void *pml4 = malloc(PAGE_SIZE_4KB);
+  /*void *pml4 = malloc(PAGE_SIZE_4KB);
 
   if (!pml4) {
     ERROR("Failed to allocate PML4\n");
@@ -411,12 +402,13 @@ static struct nk_aspace * create(char *name, nk_aspace_characteristics_t *c)
     return 0;
   }
 
-  memset(pml4,0,PAGE_SIZE_4KB);
+  memset(pml4,0,PAGE_SIZE_4KB);*/
 
-  // need to actually drill page tables for basic parts of NK
-  // ???
-  p->cr3 = pml4;
-  p->cr4 = nk_paging_default_cr4() & CR4_MASK;
+  if(paging_helper_create(&(p->cr3)) == -1){
+    ERROR("Unable create aspace cr3 in address space %s\n", name);
+  }
+
+  // p->cr4 = nk_paging_default_cr4() & CR4_MASK;
   // EFER
 
   p->aspace = nk_aspace_register(name,
@@ -429,7 +421,7 @@ static struct nk_aspace * create(char *name, nk_aspace_characteristics_t *c)
     return 0;
   }
   // start using paging table
-  setup_paging(p);
+  // setup_paging(p);
 
   DEBUG("Paging address space %s configured and initialized\n", name);
     

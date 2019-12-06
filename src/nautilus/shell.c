@@ -24,7 +24,6 @@
 #include <nautilus/nautilus.h>
 #include <nautilus/shell.h>
 #include <nautilus/vc.h>
-#define NAUT_CONFIG_ASPACES 1
 #ifdef NAUT_CONFIG_ASPACES
 #include <nautilus/aspace.h>
 #endif
@@ -715,8 +714,6 @@ shell (void * in, void ** out)
     }
 
 #ifdef NAUT_CONFIG_ASPACES
-    // put ourselves into the base address space for testing
-    // nk_aspace_move_thread(nk_aspace_find("base"));
     nk_aspace_characteristics_t c;
 
     nk_aspace_query("paging",&c);
@@ -729,15 +726,26 @@ shell (void * in, void ** out)
     // so that the kernel can work when that thread is active
     r.va_start = 0;
     r.pa_start = 0;
-    //r.len_bytes = 0x100000000UL;  // should come from kmem_, let's say 4 GB for now
-    r.len_bytes = 0x1000UL;  // should come from kmem_, let's say 4 KB for now
+    r.len_bytes = 0x100000000UL;  // should come from kmem_, let's say 4 GB for now
+    //r.len_bytes = 0x100000UL;  // should come from kmem_, let's say 4 KB for now
+    //r.len_bytes =  0x8000000UL;  // should come from kmem_, let's say 4 KB for now
     // set protections for kernel
     // use EAGER to tell paging implementation that it needs to build all these PTs right now
     r.protect.flags = NK_ASPACE_READ | NK_ASPACE_WRITE | NK_ASPACE_EXEC | NK_ASPACE_PIN | NK_ASPACE_KERN | NK_ASPACE_EAGER;
 
+       
     // now add the region
-    // nk_aspace_add_region(mas,&r);
+    nk_aspace_add_region(mas,&r);
 
+    //nk_aspace_dump_aspaces(1);
+
+    nk_vc_printf("About to move thread\n");
+    
+    // put ourselves into the base address space for testing
+    nk_aspace_move_thread(mas);
+
+    nk_vc_printf("Survived moving thread\n");
+    
 #endif
 
     nk_switch_to_vc(vc);

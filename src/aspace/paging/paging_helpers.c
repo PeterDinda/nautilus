@@ -6,8 +6,8 @@
 #define DEBUG_PRINT(fmt, args...) 
 #endif
 
-#define ERROR(fmt, args...) ERROR_PRINT("aspace-paging: helpers: ERROR %s(%d): " fmt, __FILE__, __LINE__, ##args)
-#define DEBUG(fmt, args...) DEBUG_PRINT("aspace-paging: helpers: DEBUG: " fmt, ##args)
+#define ERROR(fmt, args...) ERROR_PRINT("aspace-paging: helpers: " fmt, ##args)
+#define DEBUG(fmt, args...) DEBUG_PRINT("aspace-paging: helpers: " fmt, ##args)
 #define INFO(fmt, args...)   INFO_PRINT("aspace-paging: helpers: " fmt, ##args)
 
 

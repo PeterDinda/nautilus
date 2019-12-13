@@ -35,8 +35,8 @@
 #define DEBUG_PRINT(fmt, args...) 
 #endif
 
-#define ERROR(fmt, args...) ERROR_PRINT("aspace: ERROR %s(%d): " fmt, __FILE__, __LINE__, ##args)
-#define DEBUG(fmt, args...) DEBUG_PRINT("aspace: DEBUG: " fmt, ##args)
+#define ERROR(fmt, args...) ERROR_PRINT("aspace: " fmt, ##args)
+#define DEBUG(fmt, args...) DEBUG_PRINT("aspace: " fmt, ##args)
 #define INFO(fmt, args...)   INFO_PRINT("aspace: " fmt, ##args)
 
 

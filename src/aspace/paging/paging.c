@@ -14,8 +14,8 @@
 #define DEBUG_PRINT(fmt, args...) 
 #endif
 
-#define ERROR(fmt, args...) ERROR_PRINT("aspace-paging: ERROR %s(%d): " fmt, __FILE__, __LINE__, ##args)
-#define DEBUG(fmt, args...) DEBUG_PRINT("aspace-paging: DEBUG: " fmt, ##args)
+#define ERROR(fmt, args...) ERROR_PRINT("aspace-paging: " fmt, ##args)
+#define DEBUG(fmt, args...) DEBUG_PRINT("aspace-paging: " fmt, ##args)
 #define INFO(fmt, args...)   INFO_PRINT("aspace-paging: " fmt, ##args)
 
 
@@ -132,7 +132,7 @@ static int add_region(void *state, nk_aspace_region_t *region)
     
     mm_node* new_node = (mm_node*)malloc(sizeof(mm_node));
 
-    if (!new_node) {
+    if (!new_node) { 
 	ERROR("failed to allocate new mm_node\n");
 	return -1;
     }
@@ -425,7 +425,8 @@ static int   get_characteristics(nk_aspace_characteristics_t *c)
 static struct nk_aspace * create(char *name, nk_aspace_characteristics_t *c)
 {
   struct naut_info *info = nk_get_nautilus_info();
-  nk_aspace_paging_t *p;  
+  nk_aspace_paging_t *p;
+
   p = malloc(sizeof(*p));
   
   if (!p) {

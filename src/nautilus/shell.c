@@ -739,7 +739,7 @@ shell (void * in, void ** out)
     nk_aspace_add_region(mas,&r);
     
 
-    r.va_start = 0xffff800000000000UL;
+    r.va_start = (void*)0xffff800000000000UL;
 
     r.protect.flags = NK_ASPACE_READ | NK_ASPACE_WRITE | NK_ASPACE_EXEC | NK_ASPACE_PIN | NK_ASPACE_KERN;
 
@@ -757,7 +757,12 @@ shell (void * in, void ** out)
 
     // start reading the kernel from address 0xffff80000.....
     /// should be identical to starting from address 1 MB
-    memcmp(0x100000, 0xffff800000000000UL+0x100000, 0x40000000);
+    if( memcmp((void*)0x100000, (void*)(0xffff800000000000UL+0x100000), 0x40000000) == 0){
+      nk_vc_printf("Survived memcmp\n");
+    }
+    else{
+      nk_vc_printf("Failed memcmp\n");
+    }
     
     
     

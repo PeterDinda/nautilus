@@ -116,6 +116,7 @@ static int add_thread(void *state)
     
 static int remove_thread(void *state)
 {
+    nk_vc_printf("In remove thread function\n");
     struct nk_thread *thread = get_cur_thread();
     thread->aspace = 0;
     return 0;
@@ -150,30 +151,31 @@ static int add_region(void *state, nk_aspace_region_t *region)
     // edit page tables to match
     // easiest way: delete all page tables and start from scratch
     // assume the va and pa in region may not be page aligned
-    addr_t cur_page;
-        // not sure about the ifetch bit
+  if(region->protect.flags & NK_ASPACE_EAGER){
+    addr_t cur_page, phy_page;
     ph_pf_access_t access_type = {
 	.present = 0,
-	.write = 1,
+	.write = 1, 
 	.user = 0,
 	.ifetch = 1,
     };
     DEBUG("starting to drill from %016lx to %016lx\n",region->va_start,region->va_start+region->len_bytes);
+    phy_page = (addr_t) region->pa_start; 
     for (cur_page = (addr_t) region->va_start;
 	 cur_page < (addr_t) (region->va_start + region->len_bytes);
-	 cur_page += PAGE_SIZE_4KB ) {
+	 cur_page += PAGE_SIZE_4KB, phy_page += PAGE_SIZE_4KB ) {
 	
 	//DEBUG("invoking drill on %016lx\n",cur_addr);
 	// here how should i pick up a physical address? use the pa provied in region?
 	// looks like I map them to continuous physical memory, but it shouldn't
 	
-	if (paging_helper_drill(p->cr3, cur_page, cur_page, access_type) != 0) {
+	if (paging_helper_drill(p->cr3, cur_page, phy_page, access_type) != 0) {
 	    ERROR("Could not map page at vaddr %p paddr %p\n", cur_page, cur_page);
 	}
     }
 
     DEBUG("Finished drill\n");
-
+  }
 	
     // if we are editing the current address space then... 
     //    write_cr3((p->cr3).pml4_base);
@@ -292,8 +294,8 @@ static int exception(void *state, excp_entry_t *exp, excp_vec_t vec)
   nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
   struct nk_thread *thread = get_cur_thread();
 
-  DEBUG("Exception 0x%x on thread %d\n",vec,thread->tid);
   uint64_t va = read_cr2();
+  //DEBUG("Exception 0x%x on thread %d, virtual address 0x%x\n", vec, thread->tid, va);
 
   // FIX ME - I NOW NEED TO DRILL A PTE IF THIS IS A VALID PAGE FAULT
   // if PF
@@ -302,21 +304,26 @@ static int exception(void *state, excp_entry_t *exp, excp_vec_t vec)
   //     then drill the PTE for the address
   // if GPF
   //   - BAD - PANIC
-  // Is this the way I know if this exception is a GPF?
+  // Is this the way I know if this exception is a GPF?SPACE_EAGER  
   if(vec == NK_ASPACE_HOOK_GPF){
     panic("General protection fault on address 0x%x, on thread %d\n", va, thread->tid);
   }
   uint64_t *pte;
-  ph_pf_access_t access_type = {0, 1, 1, 0, 0, 0};
-  if(paging_helper_walk(p->cr3, va, access_type, &pte) != 0){
-     panic("Cannot find the page table entry of virtual addr 0x%x\n", va);
+  ph_pf_access_t access_type = {
+        .present = 0,
+        .write = 1,
+        .user = 0,
+        .ifetch = 1,
+  };
+  int walk_res = 0;
+  if((walk_res = paging_helper_walk(p->cr3, va, access_type, &pte)) != 0){
+     //panic("Cannot find the page table entry of virtual addr 0x%x, error code %d\n", va, walk_res);
+     if(paging_helper_drill(p->cr3, va, ((addr_t)va - 0xffff800000000000UL), access_type) != 0){
+       panic("Could not map page at vaddr %p paddr %p\n", (void*)va, (void*)(va - 0xffff800000000000UL));
+     }
+     return 0;
   }
-  uint64_t pa = PAGE_NUM_TO_ADDR_4KB((*pte) & ~0xFFF); // (((addr_t)x) << 12)
-  // what access permissions should it meet, PRESENT_BIT, WRITABLE_BIT
-  if(!(*pte & PTE_KERNEL_ONLY_BIT)){
-    panic("Illegal kernal only virtual address 0x%x, on thread %d\n", va, thread->tid);
-    return -1;
-  }
+  /*uint64_t pa = PAGE_NUM_TO_ADDR_4KB(*pte); // (((addr_t)x) << 12)
   if(!(*pte & PTE_PRESENT_BIT)){
     panic("Virtual address 0x%x not present, on thread %d\n", va, thread->tid);
     return -1;
@@ -325,13 +332,14 @@ static int exception(void *state, excp_entry_t *exp, excp_vec_t vec)
     panic("Virtual address 0x%x not writable, on thread %d\n", va, thread->tid);
     return -1;
   }
+  DEBUG("Exception 0x%x on thread physical address 0x%x\n", vec, pa);
 
   // not sure about the ifetch bit
   // access_type = { 0, 1, 1, 0, 0, 0};
   if(paging_helper_drill(p->cr3, va, pa, access_type) != 0){
     panic("Could not map page at vaddr %p paddr %p\n", (void*)va, (void*)pa);
-  }  
-  write_cr3((p->cr3).pml4_base); 
+  }*/
+  //write_cr3((p->cr3).pml4_base); 
   return 0;
 }
     

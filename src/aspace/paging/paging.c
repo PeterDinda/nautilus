@@ -18,6 +18,19 @@
 #define DEBUG(fmt, args...) DEBUG_PRINT("aspace-paging: " fmt, ##args)
 #define INFO(fmt, args...)   INFO_PRINT("aspace-paging: " fmt, ##args)
 
+// Some macros to hide the details of doing locking for
+// a paging address space
+#define ASPACE_LOCK_CONF uint8_t _aspace_lock_flags
+#define ASPACE_LOCK(a) _aspace_lock_flags = spin_lock_irq_save(&(a)->lock)
+#define ASPACE_TRY_LOCK(a) spin_try_lock_irq_save(&(a)->lock,&_aspace_lock_flags)
+#define ASPACE_UNLOCK(a) spin_unlock_irq_restore(&(a)->lock, _aspace_lock_flags);
+#define ASPACE_UNIRQ(a) irq_enable_restore(_aspace_lock_flags);
+
+
+// graceful printouts of names
+#define ASPACE_NAME(a) ((a)?(a)->aspace->name : "default")
+#define THREAD_NAME(t) ((!(t)) ? "(none)" : (t)->is_idle ? "(idle)" : (t)->name[0] ? (t)->name : "(noname)")
+
 
 typedef struct mmnode {
     nk_aspace_region_t region;
@@ -39,46 +52,8 @@ typedef struct nk_aspace_paging {
   uint64_t      cr4;
 } nk_aspace_paging_t;
 
-#if 0
-// This table defines the kernel's mappings
-static struct kmap {
-  uint64_t virt;
-  uint64_t phys_start;
-  uint64_t phys_end;
-  int  flags;
-} kmap[] = {
- // addr_t kern_start     = (addr_t)&_loadStart;
- // addr_t kern_end       = multiboot_get_modules_end(mbd);
- // not sure about the boundary of each region
- { (void*)va_kern_start, kern_start, kern_end, 0},     // kern text+rodata+normaldata+memory 
-};
 
-
-static void setup_paging(void *state){
-  // since we are still using direct mapping, all these codes should be able to execute
-  nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
-  // first, map only the kernel code, data
-  struct kmap *k;
-  uint64_t va_addr, pa_addr;
-  int nele = (sizeof(kmaps)) / sizeof(struct kmap) ; 
-  for(k = kmap; k < &kmap[nele]; k++){
-    for(va_addr = k->virt, pa_addr = k->phys_start; pa_addr < k->phys_end; va_addr += PAGE_SIZE_4KB, pa_addr += PAGE_SIZE_4KB){
-      nk_map_page(va_addr, pa_addr, k->flags, PAGE_SIZE_4KB)
-      // I can't use paging_helper_drill(), since it will allocate a new physical page. I just need to map
-    }
-  }
-  // second, write the physical address of pml4e into cr3 
-  write_cr3((p->cr3).pml4_base); 
-  // third, set up the most significant bit in cr0
-  ulong_t cr0 = read_cr0(); 
-  cr0 = cr0 | (1 << 63);
-  write_cr0(cr0);
-  // now we start using paging, if page fault happens, process can use the mapped kernel code to handle it, thus avoiding triple fault
-}
-
-#endif
-
-static  int destroy(void *state)
+static int destroy(void *state)
 {
     nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
     // free regions in list
@@ -88,18 +63,15 @@ static  int destroy(void *state)
       free(node);
     }
 
-/* don't worry about it now
-    STATE_LOCK_CONF;
-    
-    STATE_LOCK();
-    list_del(&p->aspace->aspace_list_node); 
-    STATE_UNLOCK();
-//  ....
-*/
+    ASPACE_LOCK_CONF;
+    // lets do that with a lock, perhaps? 
+    ASPACE_LOCK(p);
+
     // free paging table
     paging_helper_free(p->cr3, 1);
     // free aspace struct
     free(p); 
+    ASPACE_UNLOCK(p);
     return 0;
 }
 
@@ -139,11 +111,21 @@ static int add_region(void *state, nk_aspace_region_t *region)
     }
     
     new_node->region = *region;
+    DEBUG("in add resion region va start 0x%016lx pa start 0x%016lx, len %lx!!!!!!!\n", (void*)new_node->region.va_start, (void*)new_node->region.pa_start, new_node->region.len_bytes);      
 
     DEBUG("survived region set\n");
+
+    // haven't write the sanity check
     
     list_add(&(new_node->node), &(p->region_list));
 
+    nk_aspace_region_t *current = 0;
+    struct list_head *pos = &(p->region_list);
+    
+    list_for_each(pos, &p->region_list){
+      current = (nk_aspace_region_t *)((void*)pos - sizeof(nk_aspace_region_t));
+      DEBUG("!!!!!!!!! region va start 0x%016lx pa start 0x%016lx, len %lx!!!!!!!\n", (void*)current->va_start, (void*)current->pa_start, current->len_bytes);      
+    }
     DEBUG("survived list add\n");
     
     //    if (region->protect.flags & NK_ASPACE_EAGER) { 
@@ -177,9 +159,14 @@ static int add_region(void *state, nk_aspace_region_t *region)
     DEBUG("Finished drill\n");
   }
 	
-    // if we are editing the current address space then... 
-    //    write_cr3((p->cr3).pml4_base);
+    // if we are editing the current address space of this cpu, then we
+    // might need to flush the TLB here.   We can do that with a cr3 write
+    // like: write_cr3(p->cr3.val);
 
+    // if this aspace is active on a different cpu, we might need to do
+    // a TLB shootdown here (out of scope of class)
+    // a TLB shootdown is an interrupt to a remote CPU whose handler
+    // flushes the TLB
     
     return 0;
 }
@@ -192,7 +179,7 @@ static int remove_region(void *state, nk_aspace_region_t *region)
     nk_aspace_region_t *current = 0;
     
     list_for_each(pos, &p->region_list){
-      current = (nk_aspace_region_t *)(pos - sizeof(nk_aspace_region_t));
+      current = (nk_aspace_region_t *)((void*)pos - sizeof(nk_aspace_region_t));
       if(current->va_start == region->va_start && current->pa_start == region->pa_start &&
                  current->len_bytes == region->len_bytes){
         break;
@@ -207,24 +194,37 @@ static int remove_region(void *state, nk_aspace_region_t *region)
     list_del(&(current_mmnode->node));
     free(current_mmnode);
 
+    pos = &(p->region_list);
+    list_for_each(pos, &p->region_list){
+      current = (nk_aspace_region_t *)((void*)pos - sizeof(nk_aspace_region_t));
+      DEBUG("!!!!!!!!! region va start 0x%016lx pa start 0x%016lx, len %lx!!!!!!!\n", (void*)current->va_start, (void*)current->pa_start, current->len_bytes);      
+    }
+    DEBUG("survived list remove\n");
+    
+
     // edit page tables to match
-    ulong_t base_addr = (ulong_t)region->va_start;    
-    ulong_t end_addr = base_addr + region->len_bytes;
-    base_addr = ROUND_DOWN_TO_PAGE(base_addr);
-    end_addr = ROUND_DOWN_TO_PAGE(end_addr + PAGE_SIZE_4KB - 1);
     pte_t *pte;
-    ph_pf_access_t access_type = {0, 1, 1, 0, 0, 0} ;
-    for(; base_addr < end_addr; ){
-      // I need to add a function to get the pte, walk_page_table()
-      // in walk_page_table, it doesn't allocate pte, drill will allocate
-      // walk function only get the existing pte
-      if(paging_helper_walk(p->cr3, base_addr, access_type, &pte) != 0){
-        panic("Cannot find the page at addr 0x%x\n", base_addr);
+    ph_pf_access_t access_type = {
+        .present = 0,
+        .write = 1,
+        .user = 0,
+        .ifetch = 1,
+    };
+    addr_t cur_page;
+    ph_pte_t *p_pte;
+    for (cur_page = (addr_t) region->va_start;
+	 cur_page < (addr_t) (region->va_start + region->len_bytes);
+	 cur_page += PAGE_SIZE_4KB){
+
+      //DEBUG("remove page on %016lx\n",cur_page);
+      if(paging_helper_walk(p->cr3, cur_page, access_type, &pte) != 0){
+        panic("Cannot find the page at addr 0x%x\n", cur_page);
       }
-      *pte &= ~PTE_PRESENT_BIT;
-      base_addr += PAGE_SIZE_4KB;
+      p_pte = (ph_pte_t*)pte;
+      p_pte->present = 0;
+      //*pte &= ~PTE_PRESENT_BIT;
     } 
-    write_cr3((p->cr3).pml4_base); 
+    // write_cr3((p->cr3).pml4_base); 
     return 0;
 }
    
@@ -232,20 +232,31 @@ static int protect_region(void *state, nk_aspace_region_t *region, nk_aspace_pro
 {
     nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
     // now need to edit page tables to match
-    ulong_t base_addr = (ulong_t)region->va_start;    
-    ulong_t end_addr = base_addr + region->len_bytes;
-    base_addr = ROUND_DOWN_TO_PAGE(base_addr);
-    end_addr = ROUND_DOWN_TO_PAGE(end_addr + PAGE_SIZE_4KB - 1);
     pte_t* pte;
-    ph_pf_access_t access_type = {0, 1, 1, 0, 0, 0};
-    for(; base_addr < end_addr; ){
-      if(paging_helper_walk(p->cr3, base_addr, access_type, &pte) != 0){
-        panic("Cannot find the page at addr 0x%x\n", base_addr);
+    ph_pf_access_t access_type = {
+        .present = 0,
+        .write = 1,
+        .user = 0,
+        .ifetch = 1,
+    };
+    addr_t cur_page;
+    ph_pte_t *p_pte;
+    for (cur_page = (addr_t) region->va_start;
+	 cur_page < (addr_t) (region->va_start + region->len_bytes);
+	 cur_page += PAGE_SIZE_4KB){
+      if(paging_helper_walk(p->cr3, cur_page, access_type, &pte) != 0){
+        DEBUG("Cannot find the page at addr 0x%x due to lazy PTE construction\n", cur_page);
+        continue;
       }
-      *pte &= ~(prot->flags); // nk_aspace_protection_t in aspace.h does not match with the pte protection bit pattern in paging.h
-      base_addr += PAGE_SIZE_4KB;
+      p_pte = (ph_pte_t*)pte;
+      // FIX ME
+      if((prot->flags) & NK_ASPACE_WRITE){
+        p_pte->writable = 0; 
+
+      }
+      //*pte &= ~(prot->flags); // nk_aspace_protection_t in aspace.h does not match with the pte protection bit pattern in paging.h
     }
-    write_cr3((p->cr3).pml4_base); 
+    // write_cr3((p->cr3).pml4_base); 
     return 0;
 }
 
@@ -254,7 +265,13 @@ static int move_region(void *state, nk_aspace_region_t *cur_region, nk_aspace_re
     if(cur_region->len_bytes != new_region->len_bytes)
       ERROR("Cannot move two regions that have different length\n");
     nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
-    memcpy(new_region->va_start, cur_region->va_start, new_region->len_bytes);
+    // next, update the region in your data structure
+
+    // you can assume that the caller has done the work of copying the memory
+    // contents to the new physical memory
+
+    // next, update all corresponding page table entries that exist
+
     // now need to edit page tables to match
     remove_region(state, cur_region);
     add_region(state, new_region);
@@ -291,56 +308,87 @@ static int switch_to(void *state)
 
 static int exception(void *state, excp_entry_t *exp, excp_vec_t vec)
 {
-  nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
-  struct nk_thread *thread = get_cur_thread();
+    nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
+    struct nk_thread *thread = get_cur_thread();
+    // DEBUG("exception 0x%x on thread %d\n", vec, thread->tid);
 
-  uint64_t va = read_cr2();
-  //DEBUG("Exception 0x%x on thread %d, virtual address 0x%x\n", vec, thread->tid, va);
+    if (vec==GP_EXCP) {
+      ERROR("general protection fault encountered.... uh...\n");
+      ERROR("i have seen things that you people would not believe.\n");
+      panic("general protection fault delivered to paging subsystem\n");
+      return -1; // will never happen
+    }
 
-  // FIX ME - I NOW NEED TO DRILL A PTE IF THIS IS A VALID PAGE FAULT
-  // if PF
-  //   - if fault address (CR2) is in a valid *region*
-  //     and access permissions are OK
-  //     then drill the PTE for the address
-  // if GPF
-  //   - BAD - PANIC
-  // Is this the way I know if this exception is a GPF?SPACE_EAGER  
-  if(vec == NK_ASPACE_HOOK_GPF){
-    panic("General protection fault on address 0x%x, on thread %d\n", va, thread->tid);
-  }
-  uint64_t *pte;
-  ph_pf_access_t access_type = {
+    if (vec!=PF_EXCP) {
+      ERROR("Unknown exception %d delivered to paging subsystem\n",vec);
+      panic("Unknown exception delivered to paging subsystem\n");
+      return -1; // will never happen
+    }
+
+    uint64_t va = read_cr2();
+    ph_pf_error_t  error; // change ph_pf_error_t from struct to union
+    // FIX ME 
+    error.val = exp->error_code;
+    
+    //ASPACE_LOCK_CONF;
+    
+    //ASPACE_LOCK(p)
+
+    struct list_head *pos = &(p->region_list);
+    nk_aspace_region_t *current = 0;
+    
+    list_for_each(pos, &p->region_list){
+      current = (nk_aspace_region_t *)((void*)pos - sizeof(nk_aspace_region_t));
+      //DEBUG("!!!!!!!!! region va start 0x%016lx pa start 0x%016lx, len %lx!!!!!!!\n", (void*)current->va_start, (void*)current->pa_start, current->len_bytes);      
+      if(va >= (addr_t)current->va_start && va <= (addr_t)(current->va_start + current->len_bytes)){
+        break;
+      }
+      current = 0;
+    }
+    if (!current) {
+        // kernel thread panic
+	panic("failed to find region\n");
+        // kill user thread(how to know it is a user thread)
+        // thread->status = NK_THR_SUSPENDED;
+	return -1;
+    }
+    uint64_t pa = (addr_t)current->pa_start + (va - (addr_t)current->va_start);
+
+    uint64_t *pte;
+    ph_pf_access_t access_type = {
         .present = 0,
         .write = 1,
         .user = 0,
         .ifetch = 1,
-  };
-  int walk_res = 0;
-  if((walk_res = paging_helper_walk(p->cr3, va, access_type, &pte)) != 0){
-     //panic("Cannot find the page table entry of virtual addr 0x%x, error code %d\n", va, walk_res);
-     if(paging_helper_drill(p->cr3, va, ((addr_t)va - 0xffff800000000000UL), access_type) != 0){
-       panic("Could not map page at vaddr %p paddr %p\n", (void*)va, (void*)(va - 0xffff800000000000UL));
-     }
-     return 0;
-  }
-  /*uint64_t pa = PAGE_NUM_TO_ADDR_4KB(*pte); // (((addr_t)x) << 12)
-  if(!(*pte & PTE_PRESENT_BIT)){
-    panic("Virtual address 0x%x not present, on thread %d\n", va, thread->tid);
-    return -1;
-  }
-  if(!(*pte & PTE_WRITABLE_BIT)){
-    panic("Virtual address 0x%x not writable, on thread %d\n", va, thread->tid);
-    return -1;
-  }
-  DEBUG("Exception 0x%x on thread physical address 0x%x\n", vec, pa);
-
-  // not sure about the ifetch bit
-  // access_type = { 0, 1, 1, 0, 0, 0};
-  if(paging_helper_drill(p->cr3, va, pa, access_type) != 0){
-    panic("Could not map page at vaddr %p paddr %p\n", (void*)va, (void*)pa);
-  }*/
-  //write_cr3((p->cr3).pml4_base); 
-  return 0;
+    };
+    int walk_res = 0;
+    // page not present
+    if((walk_res = paging_helper_walk(p->cr3, va, access_type, &pte)) != 0){
+      if(paging_helper_drill(p->cr3, va, pa, access_type) != 0){
+        panic("Could not map page at vaddr %p paddr %p\n", (void*)va, (void*)pa);
+      }
+      //DEBUG("we cannot find the page 0x%x\n", (void*)va);
+      return 0;
+    }
+    DEBUG("we find the page 0x%x\n", (void*)va);
+    if(error.write){
+      panic("Virtual address 0x%x not writable, on thread %d\n", va, thread->tid);
+      return -1;
+    }
+    if(error.user){
+      panic("Virtual address 0x%x cannot be accessed by user thread %d\n", va, thread->tid);
+      return -1;
+    }
+    if(error.rsvd_access){
+      panic("Virtual address 0x%x reads a 1 from a reserved field, on thread %d\n", va, thread->tid);
+      return -1;
+    }
+    if(error.ifetch){
+      panic("Virtual address 0x%x access was an instr fetch (only with NX), on thread %d\n", va, thread->tid);
+      return -1;
+    }
+    //ASPACE_UNLOCK(p);
+    return 0;
 }
     
 static int print(void *state, int detailed)

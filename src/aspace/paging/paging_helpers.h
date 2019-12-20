@@ -182,12 +182,15 @@ typedef union ph_pte {  // mostly the same as a pde, comments show diffs
 
 // page fault error code deconstruction
 typedef struct ph_pf_error {
+  uint64_t val;
+  struct {
     uint_t present           : 1; // if 0, fault due to page not present
     uint_t write             : 1; // if 1, faulting access was a write
     uint_t user              : 1; // if 1, faulting access was in user mode
     uint_t rsvd_access       : 1; // if 1, fault from reading a 1 from a reserved field (?)
     uint_t ifetch            : 1; // if 1, faulting access was an instr fetch (only with NX)
     uint_t rsvd              : 27;
+  }__attribute__((packed));
 } __attribute__((packed)) ph_pf_error_t;
 
 // for access use, present is ignored, write=>writeable, user=>user allowed, ifetch=>ifetch ok

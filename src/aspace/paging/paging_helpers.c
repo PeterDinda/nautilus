@@ -83,7 +83,6 @@ int paging_helper_permissions_ok(uint64_t *entry, ph_pf_access_t a)
 {
     // all levels treat permissions the same, so we will use the base pte
     ph_pte_t *p = (ph_pte_t *)entry;
-
     return (p->writable>=a.write) && (p->user>=a.user) && (p->no_exec<a.ifetch);
 }
 
@@ -105,7 +104,7 @@ int paging_helper_walk(ph_cr3e_t cr3, addr_t vaddr, ph_pf_access_t access_type, 
 {
     ph_pml4e_t *pml4 = (ph_pml4e_t *)PAGE_NUM_TO_ADDR_4KB(cr3.pml4_base);
     ph_pml4e_t *pml4e = &pml4[ADDR_TO_PML4_INDEX(vaddr)];
-    
+    int res = perm_ok(pml4e,access_type);
     if (pml4e->present && perm_ok(pml4e,access_type)) {
 	ph_pdpe_t *pdp = (ph_pdpe_t *)PAGE_NUM_TO_ADDR_4KB(pml4e->pdp_base);
 	ph_pdpe_t *pdpe = &pdp[ADDR_TO_PDP_INDEX(vaddr)];

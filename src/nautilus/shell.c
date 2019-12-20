@@ -757,14 +757,28 @@ shell (void * in, void ** out)
 
     // start reading the kernel from address 0xffff80000.....
     /// should be identical to starting from address 1 MB
-    if( memcmp((void*)0x100000, (void*)(0xffff800000000000UL+0x100000), 0x40000000) == 0){
+    //if( memcmp((void*)0x100000, (void*)(0xffff800000000000UL+0x100000), 0x40000000) == 0){
+    if( memcmp((void*)0x0, (void*)(0xffff800000000000UL), 0x40000000) == 0){
       nk_vc_printf("Survived memcmp\n");
     }
     else{
       nk_vc_printf("Failed memcmp\n");
     }
+
+    nk_vc_printf("About to move region\n");
+    //r.va_start = 0;
+    r.len_bytes = 0x40000000UL;  
+    nk_aspace_remove_region(mas,&r);
+    nk_vc_printf("Survived move region\n");
     
-    
+     
+    nk_vc_printf("About to protect region\n");
+    r.va_start = 0;
+    r.len_bytes = 0x100000000UL;  // should come from kmem_, let's say 4 GB for now
+    nk_aspace_protection_t prot;
+    prot.flags = 0x2; // can't write
+    nk_aspace_protect(mas, &r, &prot);
+    nk_vc_printf("Survived protect region\n");
     
 #endif
 

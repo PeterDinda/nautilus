@@ -152,10 +152,9 @@ static int add_region(void *state, nk_aspace_region_t *region)
 	// looks like I map them to continuous physical memory, but it shouldn't
 	
 	if (paging_helper_drill(p->cr3, cur_page, phy_page, access_type) != 0) {
-	    ERROR("Could not map page at vaddr %p paddr %p\n", cur_page, cur_page);
+	    ERROR("Could not map page at vaddr %p paddr %p\n", cur_page, phy_page);
 	}
     }
-
     DEBUG("Finished drill\n");
   }
 	
@@ -184,6 +183,7 @@ static int remove_region(void *state, nk_aspace_region_t *region)
                  current->len_bytes == region->len_bytes){
         break;
       }
+      current = 0;
     }
 
     if (!current) {
@@ -241,20 +241,21 @@ static int protect_region(void *state, nk_aspace_region_t *region, nk_aspace_pro
     };
     addr_t cur_page;
     ph_pte_t *p_pte;
+
+    DEBUG("Protect region start from va 0x%lx to va 0x%lx\n", region->va_start, region->va_start + region->len_bytes);
     for (cur_page = (addr_t) region->va_start;
 	 cur_page < (addr_t) (region->va_start + region->len_bytes);
 	 cur_page += PAGE_SIZE_4KB){
       if(paging_helper_walk(p->cr3, cur_page, access_type, &pte) != 0){
-        DEBUG("Cannot find the page at addr 0x%x due to lazy PTE construction\n", cur_page);
+        DEBUG("Cannot find the page at addr 0x%lx due to lazy PTE construction\n", cur_page);
         continue;
       }
       p_pte = (ph_pte_t*)pte;
       // FIX ME
       if((prot->flags) & NK_ASPACE_WRITE){
         p_pte->writable = 0; 
-
+        DEBUG("Cannot write the page at addr 0x%lx\n", cur_page);
       }
-      //*pte &= ~(prot->flags); // nk_aspace_protection_t in aspace.h does not match with the pte protection bit pattern in paging.h
     }
     // write_cr3((p->cr3).pml4_base); 
     return 0;
@@ -265,16 +266,144 @@ static int move_region(void *state, nk_aspace_region_t *cur_region, nk_aspace_re
     if(cur_region->len_bytes != new_region->len_bytes)
       ERROR("Cannot move two regions that have different length\n");
     nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
-    // next, update the region in your data structure
 
-    // you can assume that the caller has done the work of copying the memory
-    // contents to the new physical memory
+    uint64_t va_start = (uint64_t)cur_region->va_start;
+    uint64_t va_end = (uint64_t)cur_region->va_start + cur_region->len_bytes;
+
+    // first, find the region in your data structure
+    // it had better exist and be identical except for the physical addresses
+    struct list_head *pos = &(p->region_list);
+    nk_aspace_region_t *current = 0;
+    
+    list_for_each(pos, &p->region_list){
+      current = (nk_aspace_region_t *)((void*)pos - sizeof(nk_aspace_region_t));
+      if(va_start >= (addr_t)current->va_start && va_end <= (addr_t)(current->va_start + current->len_bytes)){
+        break;
+      }
+      current = 0;
+    }
+    if (!current) {
+        // kernel thread panic
+	panic("failed to find region\n");
+        // kill user thread(how to know it is a user thread)
+        // thread->status = NK_THR_SUSPENDED;
+	return -1;
+    }
+
+    // next, update the region in your data structure
+    // ADVANCED VERSION: allow for splitting the region - if cur_region
+    // is a subset of some region, then split that region, and only move
+    // the affected addresses.   The granularity of this is that reported
+    // in the aspace characteristics (i.e., page granularity here).
+    //remove_region(state, cur_region);
+    //add_region(state, new_region);
+    mm_node *current_mmnode = (mm_node *)current;
+    list_del(&(current_mmnode->node));
+    // identical region
+    if(va_start == (addr_t)current->va_start && va_end == (addr_t)(current->va_start + current->len_bytes)){
+      mm_node *current_mmnode = (mm_node *)current;
+      list_del(&(current_mmnode->node));
+      free(current_mmnode);     
+    }
+    // subset of the region
+    else{
+        if(va_start > (addr_t)current->va_start){
+            mm_node* new_node = (mm_node*)malloc(sizeof(mm_node));
+            if (!new_node) { 
+	        ERROR("failed to allocate new mm_node\n");
+	        return -1;
+            }    
+            nk_aspace_region_t r;
+            r.va_start = current->va_start;
+	    r.pa_start = current->pa_start;
+	    r.len_bytes = va_start - (addr_t)current->va_start;
+            new_node->region = r;
+            DEBUG("in add region va start 0x%016lx pa start 0x%016lx, len %lx!!!!!!!\n", (void*)new_node->region.va_start, (void*)new_node->region.pa_start, new_node->region.len_bytes);      
+            list_add(&(new_node->node), &(p->region_list));
+        }
+        if(va_end < (addr_t)(current->va_start + current->len_bytes)){
+            mm_node* new_node = (mm_node*)malloc(sizeof(mm_node));
+            if (!new_node) { 
+	        ERROR("failed to allocate new mm_node\n");
+	        return -1;
+            }    
+            nk_aspace_region_t r;
+            r.va_start = (void*)va_end;
+	    r.pa_start = (void*)(current->pa_start + (va_end - (addr_t)current->va_start));
+	    r.len_bytes = (addr_t)(current->va_start + current->len_bytes) - va_end;
+            new_node->region = r;
+            DEBUG("in add region va start 0x%016lx pa start 0x%016lx, len %lx!!!!!!!\n", (void*)new_node->region.va_start, (void*)new_node->region.pa_start, new_node->region.len_bytes);      
+            list_add(&(new_node->node), &(p->region_list));
+        }
+    }
+    free(current_mmnode);
+
+    // add new_region into list
+    mm_node* new_node = (mm_node*)malloc(sizeof(mm_node));
+    if (!new_node) { 
+	ERROR("failed to allocate new mm_node\n");
+	return -1;
+    }
+    new_node->region = *new_region;
+    DEBUG("in add resion region va start 0x%016lx pa start 0x%016lx, len %lx!!!!!!!\n", (void*)new_node->region.va_start, (void*)new_node->region.pa_start, new_node->region.len_bytes);      
+    list_add(&(new_node->node), &(p->region_list));
+
+
+    current = 0;
+    pos = &(p->region_list);
+    
+    list_for_each(pos, &p->region_list){
+      current = (nk_aspace_region_t *)((void*)pos - sizeof(nk_aspace_region_t));
+      DEBUG("!!!!!!!!! region va start 0x%016lx pa start 0x%016lx, len %lx!!!!!!!\n", (void*)current->va_start, (void*)current->pa_start, current->len_bytes);      
+    }
+    DEBUG("survived list add\n");
+
+
+    //uint64_t pa = (addr_t)current->pa_start + (va - (addr_t)current->va_start);
+
+
+
 
     // next, update all corresponding page table entries that exist
-
-    // now need to edit page tables to match
-    remove_region(state, cur_region);
-    add_region(state, new_region);
+    // drill page table if NK_ASPACE_EAGER
+    if(new_region->protect.flags & NK_ASPACE_EAGER){
+        addr_t cur_page, phy_page;
+        ph_pf_access_t access_type = {
+	    .present = 0,
+	    .write = 1, 
+	    .user = 0,
+	    .ifetch = 1,
+        };
+        DEBUG("starting to drill from %016lx to %016lx\n", new_region->va_start, new_region->va_start + new_region->len_bytes);
+        phy_page = (addr_t) new_region->pa_start; 
+        for (cur_page = (addr_t) new_region->va_start;
+	    cur_page < (addr_t) (new_region->va_start + new_region->len_bytes);
+	    cur_page += PAGE_SIZE_4KB, phy_page += PAGE_SIZE_4KB ) {	
+	    if (paging_helper_drill(p->cr3, cur_page, phy_page, access_type) != 0) {
+	        ERROR("Could not map page at vaddr %p paddr %p\n", cur_page, phy_page);
+	    }
+        }
+        DEBUG("Finished drill\n");
+    }
+    // clear the page table entries of cur_region
+    pte_t *pte;
+    ph_pf_access_t access_type = {
+        .present = 0,
+        .write = 1,
+        .user = 0,
+        .ifetch = 1,
+    };
+    addr_t cur_page;
+    ph_pte_t *p_pte;
+    for (cur_page = (addr_t) cur_region->va_start;
+	 cur_page < (addr_t) (cur_region->va_start + cur_region->len_bytes);
+	 cur_page += PAGE_SIZE_4KB){
+      if(paging_helper_walk(p->cr3, cur_page, access_type, &pte) != 0){
+        panic("Cannot find the page at addr 0x%x\n", cur_page);
+      }
+      p_pte = (ph_pte_t*)pte;
+      p_pte->present = 0;
+    }    
     return 0;
 }
 
@@ -339,8 +468,8 @@ static int exception(void *state, excp_entry_t *exp, excp_vec_t vec)
     
     list_for_each(pos, &p->region_list){
       current = (nk_aspace_region_t *)((void*)pos - sizeof(nk_aspace_region_t));
-      //DEBUG("!!!!!!!!! region va start 0x%016lx pa start 0x%016lx, len %lx!!!!!!!\n", (void*)current->va_start, (void*)current->pa_start, current->len_bytes);      
       if(va >= (addr_t)current->va_start && va <= (addr_t)(current->va_start + current->len_bytes)){
+        DEBUG("In exception we find region va start 0x%016lx pa start 0x%016lx, len %lx!!!!!!!\n", (void*)current->va_start, (void*)current->pa_start, current->len_bytes);      
         break;
       }
       current = 0;

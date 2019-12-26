@@ -728,7 +728,6 @@ shell (void * in, void ** out)
     r.va_start = 0;
     r.pa_start = 0;
     r.len_bytes = 0x100000000UL;  // should come from kmem_, let's say 4 GB for now
-    //r.len_bytes = 0x100000UL;  // should come from kmem_, let's say 4 KB for now
     //r.len_bytes =  0x8000000UL;  // should come from kmem_, let's say 4 KB for now
     // set protections for kernel
     // use EAGER to tell paging implementation that it needs to build all these PTs right now
@@ -740,8 +739,9 @@ shell (void * in, void ** out)
     
 
     r.va_start = (void*)0xffff800000000000UL;
-
+    r.len_bytes = 0x40000000UL;
     r.protect.flags = NK_ASPACE_READ | NK_ASPACE_WRITE | NK_ASPACE_EXEC | NK_ASPACE_PIN | NK_ASPACE_KERN;
+    nk_vc_printf("ABOUT to add region start from va 0x%lx to va 0x%lx\n", r.va_start, r.va_start + r.len_bytes);
 
     nk_aspace_add_region(mas,&r);
 
@@ -757,29 +757,56 @@ shell (void * in, void ** out)
 
     // start reading the kernel from address 0xffff80000.....
     /// should be identical to starting from address 1 MB
-    //if( memcmp((void*)0x100000, (void*)(0xffff800000000000UL+0x100000), 0x40000000) == 0){
-    if( memcmp((void*)0x0, (void*)(0xffff800000000000UL), 0x40000000) == 0){
+    if( memcmp((void*)0x0, (void*)(0xffff800000000000UL), 0x4000) == 0){
+    //if( memcmp((void*)0x100001000, (void*)(0xffff800000000000UL), 0x4000) == 0){ // region not find error
       nk_vc_printf("Survived memcmp\n");
     }
     else{
       nk_vc_printf("Failed memcmp\n");
     }
 
-    nk_vc_printf("About to move region\n");
-    //r.va_start = 0;
+    /*nk_vc_printf("About to remove region\n");
     r.len_bytes = 0x40000000UL;  
     nk_aspace_remove_region(mas,&r);
-    nk_vc_printf("Survived move region\n");
-    
+    nk_vc_printf("Survived remove region\n");
+
+    // exception, fail to find region
+    if( memcmp((void*)0x0, (void*)(0xffff800000000000UL), 0x40000000) == 0){
+      nk_vc_printf("Survived memcmp\n");
+    }
+    else{
+      nk_vc_printf("Failed memcmp\n");
+    }*/
      
-    nk_vc_printf("About to protect region\n");
-    r.va_start = 0;
-    r.len_bytes = 0x100000000UL;  // should come from kmem_, let's say 4 GB for now
+    
+    nk_vc_printf("About to move region\n");
+    nk_aspace_region_t cur_r;
+    cur_r.va_start = (void*)0xffff800000001000UL;
+    cur_r.pa_start = 0;
+    cur_r.len_bytes = 0x1000UL;
+    nk_aspace_region_t new_r;
+    new_r.va_start = (void*)0xffff800500000000UL;
+    new_r.pa_start = 0;
+    new_r.len_bytes = 0x1000UL; 
+    nk_aspace_move_region(mas, &cur_r, &new_r);
+    // FIX ME
+    // should trigger region not exist, but not
+    // it doesn't trigger the exception at all
+    memcmp((void*)0x1000, (void*)(0xffff800000000500UL), 0x1000);
+
+    nk_vc_printf("Survived move region\n");
+     
+    /*r.va_start = (void*)0xffff800000000000UL;
+    r.len_bytes = 0x4000UL;  
+    nk_vc_printf("ABOUT to protect region start from va 0x%lx to va 0x%lx\n", r.va_start, r.va_start + r.len_bytes);
     nk_aspace_protection_t prot;
     prot.flags = 0x2; // can't write
-    nk_aspace_protect(mas, &r, &prot);
+    nk_aspace_protect_region(mas, &r, &prot);
     nk_vc_printf("Survived protect region\n");
     
+    addr_t *modified_region = (addr_t*)0xffff800000000000UL;
+    memset(modified_region, 1, 0x1000UL);*/
+
 #endif
 
     nk_switch_to_vc(vc);

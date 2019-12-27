@@ -181,7 +181,7 @@ typedef union ph_pte {  // mostly the same as a pde, comments show diffs
 
 
 // page fault error code deconstruction
-typedef struct ph_pf_error {
+typedef union ph_pf_error {
   uint64_t val;
   struct {
     uint_t present           : 1; // if 0, fault due to page not present

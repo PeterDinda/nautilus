@@ -231,6 +231,26 @@ static int remove_region(void *state, nk_aspace_region_t *region)
 static int protect_region(void *state, nk_aspace_region_t *region, nk_aspace_protection_t *prot)
 {
     nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
+    struct list_head *pos = &(p->region_list);
+    nk_aspace_region_t *current = 0;
+    
+    list_for_each(pos, &p->region_list){
+      current = (nk_aspace_region_t *)((void*)pos - sizeof(nk_aspace_region_t));
+      //if(current->va_start == region->va_start && current->pa_start == region->pa_start &&
+      //           current->len_bytes == region->len_bytes){
+      if(current->va_start == region->va_start && current->pa_start == region->pa_start){                 
+        break;
+      }
+      current = 0;
+    }
+
+    if (!current) {
+	ERROR("failed to find region\n");
+	return -1;
+    }
+    DEBUG("Original region flag 0x%x\n", current->protect.flags); 
+    current->protect.flags &= (prot->flags);
+    DEBUG("Protect flag 0x%x, New region flag is 0x%x\n", (prot->flags), current->protect.flags); 
     // now need to edit page tables to match
     pte_t* pte;
     ph_pf_access_t access_type = {
@@ -243,21 +263,28 @@ static int protect_region(void *state, nk_aspace_region_t *region, nk_aspace_pro
     ph_pte_t *p_pte;
 
     DEBUG("Protect region start from va 0x%lx to va 0x%lx\n", region->va_start, region->va_start + region->len_bytes);
+
     for (cur_page = (addr_t) region->va_start;
 	 cur_page < (addr_t) (region->va_start + region->len_bytes);
 	 cur_page += PAGE_SIZE_4KB){
       if(paging_helper_walk(p->cr3, cur_page, access_type, &pte) != 0){
-        DEBUG("Cannot find the page at addr 0x%lx due to lazy PTE construction\n", cur_page);
+        DEBUG("Cannot find the page at addr 0x%lx\n", cur_page);
         continue;
       }
       p_pte = (ph_pte_t*)pte;
       // FIX ME
-      if((prot->flags) & NK_ASPACE_WRITE){
+      // means it is a write protection
+      // so we need to make the writable flag in pte zero
+      DEBUG("Original pte is 0x%lx\n", *pte);
+      if(!((prot->flags) & NK_ASPACE_WRITE)){
         p_pte->writable = 0; 
         DEBUG("Cannot write the page at addr 0x%lx\n", cur_page);
       }
+      DEBUG("New pte is 0x%lx\n", *pte);
+      invlpg(PAGE_NUM_TO_ADDR_4KB(cur_page));
     }
-    // write_cr3((p->cr3).pml4_base); 
+    
+    write_cr3(p->cr3.val); 
     return 0;
 }
 
@@ -317,6 +344,7 @@ static int move_region(void *state, nk_aspace_region_t *cur_region, nk_aspace_re
             r.va_start = current->va_start;
 	    r.pa_start = current->pa_start;
 	    r.len_bytes = va_start - (addr_t)current->va_start;
+            r.protect.flags = current->protect.flags;
             new_node->region = r;
             DEBUG("in add region va start 0x%016lx pa start 0x%016lx, len %lx!!!!!!!\n", (void*)new_node->region.va_start, (void*)new_node->region.pa_start, new_node->region.len_bytes);      
             list_add(&(new_node->node), &(p->region_list));
@@ -331,6 +359,7 @@ static int move_region(void *state, nk_aspace_region_t *cur_region, nk_aspace_re
             r.va_start = (void*)va_end;
 	    r.pa_start = (void*)(current->pa_start + (va_end - (addr_t)current->va_start));
 	    r.len_bytes = (addr_t)(current->va_start + current->len_bytes) - va_end;
+            r.protect.flags = current->protect.flags;
             new_node->region = r;
             DEBUG("in add region va start 0x%016lx pa start 0x%016lx, len %lx!!!!!!!\n", (void*)new_node->region.va_start, (void*)new_node->region.pa_start, new_node->region.len_bytes);      
             list_add(&(new_node->node), &(p->region_list));
@@ -404,6 +433,7 @@ static int move_region(void *state, nk_aspace_region_t *cur_region, nk_aspace_re
       p_pte = (ph_pte_t*)pte;
       p_pte->present = 0;
     }    
+    write_cr3(p->cr3.val);
     return 0;
 }
 
@@ -439,7 +469,7 @@ static int exception(void *state, excp_entry_t *exp, excp_vec_t vec)
 {
     nk_aspace_paging_t *p = (nk_aspace_paging_t *)state;
     struct nk_thread *thread = get_cur_thread();
-    // DEBUG("exception 0x%x on thread %d\n", vec, thread->tid);
+    //DEBUG("exception 0x%x on thread %d\n", vec, thread->tid);
 
     if (vec==GP_EXCP) {
       ERROR("general protection fault encountered.... uh...\n");
@@ -458,6 +488,7 @@ static int exception(void *state, excp_entry_t *exp, excp_vec_t vec)
     ph_pf_error_t  error; // change ph_pf_error_t from struct to union
     // FIX ME 
     error.val = exp->error_code;
+    //DEBUG("error code 0x%x on thread %d\n", error.val, thread->tid);
     
     //ASPACE_LOCK_CONF;
     
@@ -468,13 +499,14 @@ static int exception(void *state, excp_entry_t *exp, excp_vec_t vec)
     
     list_for_each(pos, &p->region_list){
       current = (nk_aspace_region_t *)((void*)pos - sizeof(nk_aspace_region_t));
-      if(va >= (addr_t)current->va_start && va <= (addr_t)(current->va_start + current->len_bytes)){
-        DEBUG("In exception we find region va start 0x%016lx pa start 0x%016lx, len %lx!!!!!!!\n", (void*)current->va_start, (void*)current->pa_start, current->len_bytes);      
+      if(va >= (addr_t)current->va_start && va < (addr_t)(current->va_start + current->len_bytes)){
+        //DEBUG("In exception we find region va start 0x%016lx pa start 0x%016lx, len %lx!!!!!!!\n", (void*)current->va_start, (void*)current->pa_start, current->len_bytes);      
         break;
       }
       current = 0;
     }
     if (!current) {
+        // FIX ME
         // kernel thread panic
 	panic("failed to find region\n");
         // kill user thread(how to know it is a user thread)
@@ -482,24 +514,28 @@ static int exception(void *state, excp_entry_t *exp, excp_vec_t vec)
 	return -1;
     }
     uint64_t pa = (addr_t)current->pa_start + (va - (addr_t)current->va_start);
-
-    uint64_t *pte;
-    ph_pf_access_t access_type = {
+    
+    //DEBUG("Some Error of page 0x%lx\n", (void*)va);
+    if(!error.present){
+      //DEBUG("Error Error of page 0x%lx is not present\n", (void*)va);
+      uint64_t *pte;
+      ph_pf_access_t access_type = {
         .present = 0,
         .write = 1,
         .user = 0,
         .ifetch = 1,
-    };
-    int walk_res = 0;
-    // page not present
-    if((walk_res = paging_helper_walk(p->cr3, va, access_type, &pte)) != 0){
-      if(paging_helper_drill(p->cr3, va, pa, access_type) != 0){
-        panic("Could not map page at vaddr %p paddr %p\n", (void*)va, (void*)pa);
+      };
+      int walk_res = 0;
+      // page not present
+      if((walk_res = paging_helper_walk(p->cr3, va, access_type, &pte)) != 0){
+        DEBUG("we cannot find the page 0x%lx\n", (void*)va);
+        if(paging_helper_drill(p->cr3, va, pa, access_type) != 0){
+          panic("Could not map page at vaddr %p paddr %p\n", (void*)va, (void*)pa);
+        }
       }
-      //DEBUG("we cannot find the page 0x%x\n", (void*)va);
       return 0;
     }
-    DEBUG("we find the page 0x%x\n", (void*)va);
+    //DEBUG("Some Error Error of page 0x%lx\n", (void*)va);
     if(error.write){
       panic("Virtual address 0x%x not writable, on thread %d\n", va, thread->tid);
       return -1;
@@ -516,6 +552,7 @@ static int exception(void *state, excp_entry_t *exp, excp_vec_t vec)
       panic("Virtual address 0x%x access was an instr fetch (only with NX), on thread %d\n", va, thread->tid);
       return -1;
     }
+    //DEBUG("Some Error Error Error of page 0x%lx\n", (void*)va);
     //ASPACE_UNLOCK(p);
     return 0;
 }

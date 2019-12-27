@@ -739,7 +739,8 @@ shell (void * in, void ** out)
     
 
     r.va_start = (void*)0xffff800000000000UL;
-    r.len_bytes = 0x40000000UL;
+    //r.len_bytes = 0x40000000UL;
+    r.len_bytes = 0x4000UL;
     r.protect.flags = NK_ASPACE_READ | NK_ASPACE_WRITE | NK_ASPACE_EXEC | NK_ASPACE_PIN | NK_ASPACE_KERN;
     nk_vc_printf("ABOUT to add region start from va 0x%lx to va 0x%lx\n", r.va_start, r.va_start + r.len_bytes);
 
@@ -757,6 +758,7 @@ shell (void * in, void ** out)
 
     // start reading the kernel from address 0xffff80000.....
     /// should be identical to starting from address 1 MB
+    //if( memcmp((void*)0x0, (void*)(0xffff800000000000UL), 0x40000000) == 0){
     if( memcmp((void*)0x0, (void*)(0xffff800000000000UL), 0x4000) == 0){
     //if( memcmp((void*)0x100001000, (void*)(0xffff800000000000UL), 0x4000) == 0){ // region not find error
       nk_vc_printf("Survived memcmp\n");
@@ -789,23 +791,26 @@ shell (void * in, void ** out)
     new_r.pa_start = 0;
     new_r.len_bytes = 0x1000UL; 
     nk_aspace_move_region(mas, &cur_r, &new_r);
-    // FIX ME
-    // should trigger region not exist, but not
-    // it doesn't trigger the exception at all
-    memcmp((void*)0x1000, (void*)(0xffff800000000500UL), 0x1000);
-
+    // it will trigger region not exist
+    // memcmp((void*)0xffff800000001000, (void*)(0xffff800000000500UL), 0x1000);
     nk_vc_printf("Survived move region\n");
-     
-    /*r.va_start = (void*)0xffff800000000000UL;
-    r.len_bytes = 0x4000UL;  
-    nk_vc_printf("ABOUT to protect region start from va 0x%lx to va 0x%lx\n", r.va_start, r.va_start + r.len_bytes);
+    
+
+
+    nk_aspace_region_t prot_r;
+    prot_r.va_start = (void*)0xffff800000000000UL;
+    prot_r.pa_start = 0;
+    prot_r.len_bytes = 0x1000UL;
+    prot_r.protect.flags = r.protect.flags;
+    nk_vc_printf("ABOUT to protect region start from va 0x%lx to va 0x%lx\n", prot_r.va_start, prot_r.va_start + prot_r.len_bytes);
     nk_aspace_protection_t prot;
-    prot.flags = 0x2; // can't write
-    nk_aspace_protect_region(mas, &r, &prot);
+    prot.flags = ~0x2; // can't write
+    nk_aspace_protect_region(mas, &prot_r, &prot);
     nk_vc_printf("Survived protect region\n");
     
     addr_t *modified_region = (addr_t*)0xffff800000000000UL;
-    memset(modified_region, 1, 0x1000UL);*/
+    //memset(modified_region, 1, 0x1000UL);
+    memset((void*)0xffff800000000000UL, 1, 0x1000UL);
 
 #endif
 

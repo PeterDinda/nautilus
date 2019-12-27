@@ -152,7 +152,7 @@ int          nk_aspace_add_region(nk_aspace_t *aspace, nk_aspace_region_t *regio
 int          nk_aspace_remove_region(nk_aspace_t *aspace, nk_aspace_region_t *region);
 
 // change protections for a region
-int          nk_aspace_protect(nk_aspace_t *aspace, nk_aspace_region_t *region, nk_aspace_protection_t *prot);
+int          nk_aspace_protect_region(nk_aspace_t *aspace, nk_aspace_region_t *region, nk_aspace_protection_t *prot);
 
 int          nk_aspace_move_region(nk_aspace_t *aspace, nk_aspace_region_t *cur_region, nk_aspace_region_t *new_region);
 

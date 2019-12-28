@@ -32,6 +32,8 @@
 #define THREAD_NAME(t) ((!(t)) ? "(none)" : (t)->is_idle ? "(idle)" : (t)->name[0] ? (t)->name : "(noname)")
 
 
+static int print(void *state, int detailed);
+
 typedef struct mmnode {
     nk_aspace_region_t region;
     struct list_head node;
@@ -51,6 +53,24 @@ typedef struct nk_aspace_paging {
 #define CR4_MASK 0xb0ULL // bits 4,5,7
   uint64_t      cr4;
 } nk_aspace_paging_t;
+
+
+static void pagewalk_analysis(uint64_t va, int level, uint64_t *entry, ph_pf_access_t access_type){
+    DEBUG("Vaddr %016lx page walk function failed in %dth level\n", va, level);
+    ph_pte_t *pte = (ph_pte_t*)entry;
+    if(!pte->present){
+        DEBUG("page walk function failed due to vaddr %016lx page is not present\n", va);    
+    }
+    else if(pte->writable < access_type.write){
+        DEBUG("page walk function failed due to vaddr %016lx page's write protection \n", va);    
+    }
+    else if(pte->user < access_type.user){
+        DEBUG("page walk function failed due to vaddr %016lx page's kernel only protection \n", va);    
+    }
+    else if(pte->no_exec >= access_type.ifetch){
+        DEBUG("page walk function failed due to vaddr %016lx page's not executable protection \n", va);    
+    }
+}
 
 
 static int destroy(void *state)
@@ -212,13 +232,16 @@ static int remove_region(void *state, nk_aspace_region_t *region)
     };
     addr_t cur_page;
     ph_pte_t *p_pte;
+    int walk_res = 0;
     for (cur_page = (addr_t) region->va_start;
 	 cur_page < (addr_t) (region->va_start + region->len_bytes);
 	 cur_page += PAGE_SIZE_4KB){
 
       //DEBUG("remove page on %016lx\n",cur_page);
-      if(paging_helper_walk(p->cr3, cur_page, access_type, &pte) != 0){
-        panic("Cannot find the page at addr 0x%x\n", cur_page);
+      if((walk_res = paging_helper_walk(p->cr3, cur_page, access_type, &pte)) != 0){
+        //panic("Cannot find the page at addr 0x%x\n", cur_page);
+        pagewalk_analysis(cur_page, walk_res, pte, access_type);
+        continue;
       }
       p_pte = (ph_pte_t*)pte;
       p_pte->present = 0;
@@ -263,12 +286,13 @@ static int protect_region(void *state, nk_aspace_region_t *region, nk_aspace_pro
     ph_pte_t *p_pte;
 
     DEBUG("Protect region start from va 0x%lx to va 0x%lx\n", region->va_start, region->va_start + region->len_bytes);
-
+    int walk_res = 0;
     for (cur_page = (addr_t) region->va_start;
 	 cur_page < (addr_t) (region->va_start + region->len_bytes);
 	 cur_page += PAGE_SIZE_4KB){
-      if(paging_helper_walk(p->cr3, cur_page, access_type, &pte) != 0){
-        DEBUG("Cannot find the page at addr 0x%lx\n", cur_page);
+      if((walk_res = paging_helper_walk(p->cr3, cur_page, access_type, &pte)) != 0){
+        //DEBUG("Cannot find the page at addr 0x%lx\n", cur_page);
+        pagewalk_analysis(cur_page, walk_res, pte, access_type);
         continue;
       }
       p_pte = (ph_pte_t*)pte;
@@ -280,8 +304,10 @@ static int protect_region(void *state, nk_aspace_region_t *region, nk_aspace_pro
         p_pte->writable = 0; 
         DEBUG("Cannot write the page at addr 0x%lx\n", cur_page);
       }
+ 
       DEBUG("New pte is 0x%lx\n", *pte);
-      invlpg(PAGE_NUM_TO_ADDR_4KB(cur_page));
+      print((void*)p, 1);
+      invlpg(cur_page);
     }
     
     write_cr3(p->cr3.val); 
@@ -424,11 +450,14 @@ static int move_region(void *state, nk_aspace_region_t *cur_region, nk_aspace_re
     };
     addr_t cur_page;
     ph_pte_t *p_pte;
+    int walk_res = 0;
     for (cur_page = (addr_t) cur_region->va_start;
 	 cur_page < (addr_t) (cur_region->va_start + cur_region->len_bytes);
 	 cur_page += PAGE_SIZE_4KB){
-      if(paging_helper_walk(p->cr3, cur_page, access_type, &pte) != 0){
-        panic("Cannot find the page at addr 0x%x\n", cur_page);
+      if((walk_res = paging_helper_walk(p->cr3, cur_page, access_type, &pte)) != 0){
+        pagewalk_analysis(cur_page, walk_res, pte, access_type);
+        continue;
+        //panic("Cannot find the page at addr 0x%x\n", cur_page);
       }
       p_pte = (ph_pte_t*)pte;
       p_pte->present = 0;
@@ -528,7 +557,8 @@ static int exception(void *state, excp_entry_t *exp, excp_vec_t vec)
       int walk_res = 0;
       // page not present
       if((walk_res = paging_helper_walk(p->cr3, va, access_type, &pte)) != 0){
-        DEBUG("we cannot find the page 0x%lx\n", (void*)va);
+        pagewalk_analysis(va, walk_res, pte, access_type);
+        //DEBUG("we cannot find the page 0x%lx\n", (void*)va);
         if(paging_helper_drill(p->cr3, va, pa, access_type) != 0){
           panic("Could not map page at vaddr %p paddr %p\n", (void*)va, (void*)pa);
         }
@@ -575,10 +605,11 @@ static int print(void *state, int detailed)
   list_for_each(pos, &p->region_list){
       mm_node *node = list_entry(pos,mm_node,node);
       nk_aspace_region_t *region = &node->region;
-      nk_vc_printf("   Region: %016lx - %016lx => %016lx\n",
+      nk_vc_printf("   Region: %016lx - %016lx => %016lx - %016lx\n",
 		   (uint64_t) region->va_start,
 		   (uint64_t) region->va_start + region->len_bytes, 
-		   (uint64_t) region->pa_start);
+		   (uint64_t) region->pa_start,
+                   (uint64_t) region->pa_start + region->len_bytes);
   }
   
   if (!detailed) {
@@ -591,22 +622,24 @@ static int print(void *state, int detailed)
   uint64_t i, j, k, m;
   for (i = 0; i < NUM_PML4_ENTRIES; i++) {
     if(pml4e[i].present){
-	nk_vc_printf("pml4e[%d]=%016lx\n",i,pml4e[i].val);
+      //nk_vc_printf("pml4e[%d]=%016lx\n",i,pml4e[i].val);
       ph_pdpe_t *pdpe = (ph_pdpe_t *)PAGE_NUM_TO_ADDR_4KB(pml4e[i].pdp_base);
       for (j = 0; j < NUM_PDPT_ENTRIES; j++) {
         if(pdpe[j].present){
-	    nk_vc_printf("pdpe[%d]=%016lx\n",j,pdpe[j].val);
+	  //nk_vc_printf("pdpe[%d]=%016lx\n",j,pdpe[j].val);
           ph_pde_t * pde = (ph_pde_t *)PAGE_NUM_TO_ADDR_4KB(pdpe[j].pd_base);          
           for (k = 0; k < NUM_PD_ENTRIES; k++) {
             if(pde[k].present){
-	    nk_vc_printf("pde[%d]=%016lx\n",k,pde[k].val);
+	      //nk_vc_printf("pde[%d]=%016lx\n",k,pde[k].val);
               ph_pte_t * pte = (ph_pte_t *)PAGE_NUM_TO_ADDR_4KB(pde[k].pt_base);
               for (m = 0; m < NUM_PT_ENTRIES; m++) {
                 if(pte[m].present){
-	    nk_vc_printf("pte[%d]=%016lx\n",m,pte[m].val);
                   uint64_t va = (i << PML4_SHIFT) | (j << PDPT_SHIFT) | (k << PD_SHIFT) | (m << PT_SHIFT) ;
                   uint64_t pa = PAGE_NUM_TO_ADDR_4KB(pte[m].page_base);
-                  nk_vc_printf("   Page: va 0x%x -> pa 0x%x\n", va, pa);
+                  if(va >= 0x100000000){
+	            nk_vc_printf("pte[%d]=%016lx\n", m, pte[m].val);
+                    nk_vc_printf("   Page: va %016lx -> pa %016lx\n", va, pa);
+                  } 
                 }
               }
             }
